@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wastraq — GIS QA</title>
+<link rel="stylesheet" href="/assets/wq.css">
+<style>
+  .two { display: grid; grid-template-columns: minmax(0,1fr) minmax(260px,320px); gap: 14px; align-items: start; }
+  @media (max-width: 1240px) { .two { grid-template-columns: 1fr; } }
+  #rows .trunc { max-width: 24ch; }
+</style>
+</head>
+<body>
+<script src="/assets/wq.js"></script>
+
+<div class="drawer-scrim" id="qd-scrim"></div>
+<aside class="drawer" id="qd">
+  <header>
+    <div class="stack" style="flex:1"><h3 id="qd-title">Issue</h3>
+      <span class="small muted" id="qd-sub"></span></div>
+    <button class="icon ghost" onclick="QD.close()">✕</button>
+  </header>
+  <div class="body" id="qd-body"></div>
+  <footer>
+    <a class="btn" id="qd-field" href="#">Open in field survey</a>
+    <a class="btn" id="qd-review" href="#">Review</a>
+    <button onclick="QD.close()">Close</button>
+  </footer>
+</aside>
+
+<script>
+const main = WQ.shell({
+  title: 'GIS quality assurance',
+  subtitle: 'Automated geometry and data checks across the property master',
+  suite: 'Survey', user: 'GIS admin'
+});
+
+main.innerHTML = `
+  <div class="row wrap">
+    <label class="field"><span>Status</span><select id="f_status">
+      <option value="OPEN">Open</option><option value="ACKNOWLEDGED">Acknowledged</option>
+      <option value="RESOLVED">Resolved</option><option value="WONT_FIX">Won't fix</option>
+      <option value="">All</option></select></label>
+    <label class="field"><span>Severity</span><select id="f_sev">
+      <option value="">All</option><option>CRITICAL</option><option>HIGH</option>
+      <option>MEDIUM</option><option>LOW</option></select></label>
+    <label class="field grow"><span>Issue type</span><select id="f_type">
+      <option value="">All types</option></select></label>
+    <label class="field"><span>Acting as</span><select id="me"></select></label>
+    <div class="spacer" style="flex:1"></div>
+    <button id="reset">Reset</button>
+    <button class="primary" id="runBtn">Run GIS QA checks</button>
+  </div>
+
+  <div class="note-box">
+    These checks run against PostGIS, not against a cached copy. Each one either opens an issue
+    or auto-resolves an issue that no longer holds, so this list reflects the state of the
+    database at the moment the checks last ran.
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="two">
+    <section class="card">
+      <header><h2>Issues</h2><div class="spacer"></div>
+        <input id="f_q" placeholder="Property, ward, surveyor…" style="max-width:220px">
+        <span class="small muted" id="count">—</span></header>
+      <div class="body flush tbl-wrap" style="max-height:calc(100vh - 380px)">
+        <table class="tbl">
+          <thead><tr><th>Severity</th><th>Issue</th><th>Property</th><th>Ward</th>
+            <th>Surveyor</th><th>Detected</th><th>Status</th><th></th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <header><h2>By type</h2><div class="spacer"></div>
+        <span class="small muted">open only</span></header>
+      <div class="body" id="byType"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <header><h2>Last check run</h2><div class="spacer"></div>
+      <span class="small muted" id="runAt">not run in this session</span></header>
+    <div class="body" id="runOut">
+      ${WQ.emptyState('No run yet in this browser session',
+        'Press “Run GIS QA checks”. Issues listed above were detected by earlier runs.')}
+    </div>
+  </section>
+`;
+
+const QD = WQ.drawer('qd');
+let ROWS = [], USERS = [];
+
+const TYPES = ['MISSING_ENTRANCE', 'MISSING_FRONTAGE', 'MISSING_SERVICE_ZONE', 'INVALID_GEOMETRY',
+  'SERVICE_ZONE_OVERLAP', 'ENTRANCE_WRONG_SIDE', 'LOW_MAPPING_CONFIDENCE', 'LARGE_GPS_DISPLACEMENT',
+  'PROPERTY_OUTSIDE_ASSIGNED_AREA', 'PROPERTY_ROUTE_MISMATCH', 'DUPLICATE_PROPERTY',
+  'MANUAL_REVIEW_REQUIRED'];
+
+const nice = (t) => String(t || '').replace(/_/g, ' ').toLowerCase()
+  .replace(/^./, c => c.toUpperCase());
+
+// One narrow control instead of a row of buttons - the table has to stay readable
+// at laptop width, and every issue has at most three sensible next states.
+const NEXT = {
+  OPEN:         [['ACKNOWLEDGED', 'Acknowledge'], ['RESOLVED', 'Resolve'], ['WONT_FIX', "Won't fix"]],
+  ACKNOWLEDGED: [['RESOLVED', 'Resolve'], ['WONT_FIX', "Won't fix"], ['OPEN', 'Reopen']],
+  RESOLVED:     [['OPEN', 'Reopen']],
+  WONT_FIX:     [['OPEN', 'Reopen']]
+};
+function actionSelect(r) {
+  const opts = NEXT[r.status] || NEXT.OPEN;
+  return '<select class="sm" data-id="' + WQ.esc(r.issue_id) + '">' +
+    '<option value="">Action…</option>' +
+    opts.map(o => '<option value="' + o[0] + '">' + WQ.esc(o[1]) + '</option>').join('') +
+    '</select>';
+}
+
+function render() {
+  const q = WQ.$('#f_q').value.trim().toLowerCase();
+  const list = ROWS.filter(r => !q ||
+    [r.property_id, r.ward_name, r.zone_name, r.surveyor_name, r.house_number, r.issue_type]
+      .some(v => (v || '').toLowerCase().indexOf(q) >= 0));
+
+  WQ.$('#count').textContent = list.length + ' of ' + ROWS.length;
+  WQ.$('#rows').innerHTML = list.length ? list.map(r =>
+    '<tr data-id="' + WQ.esc(r.issue_id) + '">' +
+      '<td class="nowrap">' + WQ.sevChip(r.severity) + '</td>' +
+      '<td style="min-width:190px"><b class="small">' + WQ.esc(nice(r.issue_type)) + '</b>' +
+        '<div class="small muted trunc" title="' + WQ.esc(r.description || '') + '">' +
+        WQ.esc(r.description || '') + '</div></td>' +
+      '<td class="mono small clickable nowrap" data-open="' + WQ.esc(r.property_id) + '">' +
+        WQ.esc(r.property_id) + '<div class="small muted">' +
+        WQ.esc(r.house_number || '') + '</div></td>' +
+      '<td class="small">' + WQ.esc(r.ward_name || '—') + '</td>' +
+      '<td class="small nowrap">' + WQ.esc(r.surveyor_name || '—') + '</td>' +
+      '<td class="small muted nowrap">' + WQ.ago(r.detected_at) + '</td>' +
+      '<td>' + WQ.chip(r.status) + '</td>' +
+      '<td class="nowrap">' + actionSelect(r) + '</td>' +
+    '</tr>').join('')
+    : '<tr><td colspan="8">' + WQ.emptyState('No issues match',
+        'Either the data is clean for this filter, or the checks have not run yet.') + '</td></tr>';
+
+  WQ.$$('#rows select[data-id]').forEach(sel => sel.addEventListener('change', () => {
+    const v = sel.value;
+    sel.selectedIndex = 0;
+    if (v) setStatus(sel.dataset.id, v);
+  }));
+  WQ.$$('#rows [data-open]').forEach(td => td.addEventListener('click', () =>
+    openProperty(td.dataset.open)));
+
+  const counts = {};
+  ROWS.filter(r => r.status === 'OPEN').forEach(r =>
+    counts[r.issue_type] = (counts[r.issue_type] || 0) + 1);
+  const max = Math.max(1, ...Object.values(counts));
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  WQ.$('#byType').innerHTML = entries.length ? entries.map(([t, n]) =>
+    '<div class="meter" style="margin-bottom:10px">' +
+      '<span class="small">' + WQ.esc(nice(t)) + '</span>' +
+      '<span class="mono small">' + n + '</span>' +
+      '<div class="m-track"><i style="width:' + (100 * n / max) + '%;background:' +
+        WQ.sevColour(severityOf(t)) + '"></i></div>' +
+    '</div>').join('')
+    : WQ.emptyState('Nothing open', 'No open issues in the current result set.');
+
+  const sev = (s) => ROWS.filter(r => r.severity === s && r.status === 'OPEN').length;
+  WQ.$('#kpis').innerHTML = [
+    WQ.kpi({ label: 'Open issues', value: WQ.num(ROWS.filter(r => r.status === 'OPEN').length),
+             tone: 'warn', sub: 'across the whole authority' }),
+    WQ.kpi({ label: 'Critical', value: WQ.num(sev('CRITICAL')), tone: 'crit',
+             sub: 'invalid geometry — fix first' }),
+    WQ.kpi({ label: 'High', value: WQ.num(sev('HIGH')), tone: 'serious',
+             sub: 'missing or overlapping structure' }),
+    WQ.kpi({ label: 'Properties affected', tone: 'violet',
+             value: WQ.num(new Set(ROWS.filter(r => r.status === 'OPEN')
+               .map(r => r.property_id)).size),
+             sub: 'distinct properties with an open issue' })
+  ].join('');
+  WQ.setNavBadge('qa', ROWS.filter(r => r.status === 'OPEN').length);
+}
+
+function severityOf(type) {
+  const r = ROWS.find(x => x.issue_type === type);
+  return r ? r.severity : 'MEDIUM';
+}
+
+async function setStatus(issueId, status) {
+  try {
+    await WQ.api('/survey/api/qa-issues/' + encodeURIComponent(issueId), {
+      method: 'PATCH',
+      body: { status: status, resolved_by: WQ.$('#me').value || null }
+    });
+    WQ.toast(issueId + ' → ' + WQ.state(status).label, status === 'RESOLVED' ? 'good' : 'accent');
+    await load();
+  } catch (e) { WQ.toast(e.message, 'crit'); }
+}
+
+async function openProperty(pid) {
+  QD.open();
+  WQ.$('#qd-title').textContent = pid;
+  WQ.$('#qd-sub').textContent = 'loading…';
+  WQ.$('#qd-body').innerHTML = '<div class="skel" style="height:160px"></div>';
+  WQ.$('#qd-field').href = '/survey/field' + WQ.qs({ property: pid });
+  WQ.$('#qd-review').href = '/survey/review' + WQ.qs({ property: pid });
+  try {
+    const d = await WQ.api('/survey/api/properties/' + encodeURIComponent(pid) + '/survey');
+    const p = d.property, g = d.geometry;
+    WQ.$('#qd-sub').textContent = [p.ward_name, p.zone_name, p.route_id].filter(Boolean).join(' · ');
+    WQ.$('#qd-body').innerHTML =
+      '<div class="row wrap" style="gap:6px">' + WQ.chip(p.survey_status) +
+        WQ.chip(p.verification_status) + '</div>' +
+      '<div><div class="section-title">Open issues</div>' +
+        (d.qa_issues.filter(q => q.status === 'OPEN').length
+          ? d.qa_issues.filter(q => q.status === 'OPEN').map(q =>
+            '<div style="margin-top:8px">' +
+              '<div class="row" style="gap:8px">' + WQ.sevChip(q.severity) +
+                '<b class="small">' + WQ.esc(nice(q.issue_type)) + '</b></div>' +
+              '<div class="small muted">' + WQ.esc(q.description || '') + '</div>' +
+              '<div class="small muted">detected ' + WQ.dateOf(q.detected_at) + '</div>' +
+            '</div>').join('')
+          : '<div class="small muted">None open.</div>') +
+      '</div>' +
+      '<div><div class="section-title">GIS structure</div><dl class="kv">' +
+        '<dt>Entrance</dt><dd>' + (g.entrance ? 'mapped' : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Frontage</dt><dd>' + (g.frontage ? (g.frontage.length_m || '?') + ' m'
+          : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Service zone</dt><dd>' + (g.service_zone ? (g.service_zone.area_m2 || '?') + ' m²'
+          : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Surveyor</dt><dd>' + WQ.esc(p.surveyor_name || '—') + '</dd>' +
+        '<dt>Confidence</dt><dd>' + (p.survey_mapping_confidence
+          ? WQ.chip(p.survey_mapping_confidence) : '—') + '</dd>' +
+      '</dl></div>';
+  } catch (e) {
+    WQ.$('#qd-body').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+async function runChecks() {
+  const btn = WQ.$('#runBtn');
+  btn.disabled = true; btn.textContent = 'Running…';
+  WQ.$('#runOut').innerHTML = '<div class="skel" style="height:120px"></div>';
+  try {
+    const r = await WQ.api('/survey/api/qa/run', { method: 'POST', body: {} });
+    const rows = Object.entries(r.checks || {});
+    WQ.$('#runAt').textContent = 'ran at ' + new Date().toLocaleTimeString([], { hour12: false });
+    WQ.$('#runOut').innerHTML =
+      '<table class="tbl compact"><thead><tr><th>Check</th><th class="num">Matched</th>' +
+      '<th class="num">Newly opened</th><th class="num">Auto-resolved</th></tr></thead><tbody>' +
+      rows.map(([t, v]) =>
+        '<tr><td class="small">' + WQ.esc(nice(t)) + '</td>' +
+        '<td class="num">' + WQ.num(v.matched) + '</td>' +
+        '<td class="num">' + (v.opened ? '<b>' + v.opened + '</b>' : '0') + '</td>' +
+        '<td class="num">' + (v.auto_resolved ? '<b>' + v.auto_resolved + '</b>' : '0') + '</td></tr>'
+      ).join('') + '</tbody></table>' +
+      '<div class="small muted" style="margin-top:8px">' + WQ.num(r.open_issues) +
+      ' issue(s) open after this run.</div>';
+    WQ.toast('QA checks complete · ' + WQ.num(r.open_issues) + ' open', 'accent');
+    await load();
+  } catch (e) {
+    WQ.$('#runOut').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  } finally { btn.disabled = false; btn.textContent = 'Run GIS QA checks'; }
+}
+
+async function load() {
+  WQ.$('#rows').innerHTML = WQ.skeletonRows(8, 6);
+  try {
+    ROWS = await WQ.api('/survey/api/qa-issues' + WQ.qs({
+      status: WQ.$('#f_status').value || null,
+      severity: WQ.$('#f_sev').value || null,
+      issue_type: WQ.$('#f_type').value || null,
+      limit: 1000
+    }));
+    render();
+  } catch (e) {
+    WQ.$('#rows').innerHTML = '<tr><td colspan="8"><div class="err-box">' +
+      WQ.esc(e.message) + '</div></td></tr>';
+  }
+}
+
+async function boot() {
+  WQ.$('#f_type').innerHTML = '<option value="">All types</option>' +
+    TYPES.map(t => '<option value="' + t + '">' + WQ.esc(nice(t)) + '</option>').join('');
+  try {
+    USERS = await WQ.api('/survey/api/users');
+    WQ.$('#me').innerHTML = USERS
+      .filter(u => ['GIS_ADMIN', 'REVIEWER', 'SUPERVISOR', 'ADMIN'].indexOf(u.role) >= 0)
+      .map(u => '<option value="' + WQ.esc(u.user_id) + '">' + WQ.esc(u.name) + '</option>').join('');
+  } catch (e) { WQ.toast('Users: ' + e.message, 'crit'); }
+
+  ['#f_status', '#f_sev', '#f_type'].forEach(s => WQ.$(s).addEventListener('change', load));
+  let t = null;
+  WQ.$('#f_q').addEventListener('input', () => { clearTimeout(t); t = setTimeout(render, 200); });
+  WQ.$('#reset').addEventListener('click', () => {
+    WQ.$('#f_status').value = 'OPEN'; WQ.$('#f_sev').value = '';
+    WQ.$('#f_type').value = ''; WQ.$('#f_q').value = ''; load();
+  });
+  WQ.$('#runBtn').addEventListener('click', runChecks);
+
+  const pid = WQ.param('property');
+  await load();
+  if (pid) openProperty(pid);
+}
+boot();
+document.addEventListener('wq:theme', render);
+</script>
+</body>
+</html>

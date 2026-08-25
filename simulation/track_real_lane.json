@@ -1,0 +1,67 @@
+{
+  "name": "2nd Cross Road, Krishnamurthy Puram (real surveyed lane)",
+  "picker_id": "PICKER-01",
+  "track_id": "TRACK-KMP-001",
+  "waypoints": [
+    {
+      "label": "VEHICLE",
+      "latitude": 12.2939826,
+      "longitude": 76.6420372,
+      "note": "vehicle parked off the lane at the east end"
+    },
+    {
+      "label": "APPROACH",
+      "latitude": 12.2942472,
+      "longitude": 76.6419471,
+      "note": "walking in from the east end, just short of the first zone"
+    },
+    {
+      "label": "ZONE",
+      "latitude": 12.2942617,
+      "longitude": 76.6418724,
+      "note": "inside the service zone of PROP-001 (south side)"
+    },
+    {
+      "label": "ZONE",
+      "latitude": 12.2942848,
+      "longitude": 76.6417632,
+      "note": "inside the service zone of PROP-002 (south side)"
+    },
+    {
+      "label": "ZONE",
+      "latitude": 12.2943032,
+      "longitude": 76.6416576,
+      "note": "inside the service zone of PROP-003 (south side)"
+    },
+    {
+      "label": "GAP",
+      "latitude": 12.2943051,
+      "longitude": 76.6415366,
+      "note": "standing between PROP-004 and PROP-005"
+    },
+    {
+      "label": "CROSSING",
+      "latitude": 12.2943291,
+      "longitude": 76.6414898,
+      "note": "crossing the carriageway - both rows plausible"
+    },
+    {
+      "label": "ZONE",
+      "latitude": 12.2943113,
+      "longitude": 76.641831,
+      "note": "inside the service zone of PROP-016 (north side)"
+    },
+    {
+      "label": "ZONE",
+      "latitude": 12.2943326,
+      "longitude": 76.6416985,
+      "note": "inside the service zone of PROP-015 (north side)"
+    },
+    {
+      "label": "RETURN",
+      "latitude": 12.2935655,
+      "longitude": 76.6414027,
+      "note": "walking back to the vehicle, off the lane"
+    }
+  ]
+}

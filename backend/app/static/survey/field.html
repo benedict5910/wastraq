@@ -1,0 +1,864 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Wastraq — Field survey</title>
+<link rel="stylesheet" href="/assets/wq.css">
+<style>
+  main.content { padding: 14px; }
+  .field-wrap { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btn-row > button, .btn-row > .btn, .btn-row > label.btn {
+    flex: 1 1 auto; min-width: max-content; justify-content: center; }
+  .step-no { display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 50%; background: var(--surface-3);
+    color: var(--ink-2); font-size: 11.5px; font-weight: 700; margin-right: 8px; }
+  .step-done .step-no { background: var(--good); color: #06210f; }
+  .gnss-readout { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
+    background: var(--surface-2); border-radius: var(--radius-s); padding: 12px 14px;
+    font-family: var(--mono); font-size: 13px; }
+  .gnss-readout .lbl { color: var(--ink-3); font-family: var(--sans); font-size: 12px; }
+  #fmap { height: 400px; }
+  @media (max-width: 720px) { #fmap { height: 320px; } }
+  .mode-bar { display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+    border-radius: var(--radius-s); background: var(--surface-2);
+    border: 1px solid var(--line-1); font-size: 12.5px; }
+  .mode-bar.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+  .mode-bar b { font-weight: 660; }
+  .geo-stat { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--ink-2); }
+  .geo-stat span { font-family: var(--mono); }
+  .req { color: var(--crit); }
+  .photo-mark { position: absolute; left: 8px; top: 8px; z-index: 2;
+    font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+    padding: 3px 7px; border-radius: 999px; background: rgba(0,0,0,.62); color: #fff; }
+  .photo-frame { position: relative; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<script src="/assets/wq.js"></script>
+<script src="/assets/wq-map.js"></script>
+
+<script>
+const main = WQ.shell({
+  title: 'Field survey',
+  subtitle: 'Capture one property on site',
+  suite: 'Survey', user: 'Surveyor'
+});
+
+main.innerHTML = `
+<div class="field-wrap">
+
+  <!-- ============================ property ============================ -->
+  <section class="card" id="c-prop">
+    <header><h2><span class="step-no">1</span>Property information</h2>
+      <div class="spacer"></div><span id="p-chips" class="row" style="gap:6px"></span></header>
+    <div class="body">
+      <div class="filters">
+        <label class="field grow"><span>Property ID</span>
+          <input id="q_pid" placeholder="PROP-01001" autocomplete="off"></label>
+        <label class="field"><span>Surveyor</span><select id="q_surveyor"></select></label>
+        <div style="align-self:flex-end;padding-bottom:1px">
+          <button class="primary" id="openBtn">Open</button></div>
+      </div>
+      <div id="p-body">
+        ${WQ.emptyState('Enter a property ID to begin',
+          'Or open one from the <a href="/survey/map">survey map</a>.')}
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ location ============================ -->
+  <section class="card wf" id="c-loc" hidden>
+    <header><h2><span class="step-no">2</span>Device location</h2>
+      <div class="spacer"></div><span class="small muted" id="loc-src"></span></header>
+    <div class="body">
+      <div class="gnss-readout">
+        <span class="lbl">Latitude</span><span id="g_lat">—</span>
+        <span class="lbl">Longitude</span><span id="g_lon">—</span>
+        <span class="lbl">Accuracy</span><span id="g_acc">—</span>
+        <span class="lbl">Captured</span><span id="g_at">—</span>
+      </div>
+      <div id="accWarn"></div>
+      <div class="btn-row">
+        <button class="primary" id="fetchBtn">Fetch location</button>
+        <button id="useBtn" disabled>Use location</button>
+        <button id="retakeBtn" disabled>Retake</button>
+        <button id="adjBtn" disabled>Adjust on map</button>
+        <button id="simBtn">Simulate fix</button>
+      </div>
+      <div class="note-box small">
+        The device fix is stored exactly as reported and is never overwritten. Moving the
+        point on the map records a <b>separate</b> corrected entrance, plus who moved it and
+        when. <b>Simulate fix</b> is a development fallback for desktops without geolocation —
+        it is stored as <code>SIMULATED</code>, so it can never be mistaken for a field capture.
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== map =============================== -->
+  <section class="card wf" id="c-map" hidden>
+    <header><h2>Map</h2><div class="spacer"></div>
+      <button class="sm" id="fitBtn">Fit</button>
+      <button class="sm" id="bmBtn">Basemap</button></header>
+    <div class="body" style="padding-bottom:0">
+      <div class="mode-bar" id="modeBar"><b>Mode:</b> <span id="modeTxt">idle — pan and zoom</span></div>
+    </div>
+    <div id="fmap"></div>
+    <div class="body" style="padding-top:10px">
+      <div class="legend">
+        <span><i style="background:var(--good)"></i>Entrance = Point</span>
+        <span><i style="background:var(--accent)"></i>Frontage = Line</span>
+        <span><i style="background:var(--violet)"></i>Service zone = Polygon</span>
+        <span><i style="background:var(--warn)"></i>Raw GNSS fix</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ entrance ============================ -->
+  <section class="card wf" id="c-ent" hidden>
+    <header><h2><span class="step-no">3</span>Entrance <span class="small muted">— Point</span></h2>
+      <div class="spacer"></div><span id="ent-state" class="small muted"></span></header>
+    <div class="body">
+      <div class="small muted">The practical service access point: the gate, shop door, or
+        common collection entrance the collector actually approaches.</div>
+      <div class="gnss-readout" id="entReadout" hidden>
+        <span class="lbl">Latitude</span><span id="e_lat">—</span>
+        <span class="lbl">Longitude</span><span id="e_lon">—</span>
+      </div>
+      <div class="btn-row">
+        <button class="primary" id="entMark">Mark entrance</button>
+        <button id="entConfirm" disabled>Confirm</button>
+        <button id="entAdjust" disabled>Adjust</button>
+        <button id="entReset" disabled>Reset</button>
+      </div>
+      <div class="small muted">Tap the map once to place it, then drag the marker to fine-tune
+        before confirming.</div>
+    </div>
+  </section>
+
+  <!-- ============================ frontage ============================ -->
+  <section class="card wf" id="c-fro" hidden>
+    <header><h2><span class="step-no">4</span>Frontage <span class="small muted">— LineString</span></h2>
+      <div class="spacer"></div><span id="fro-state" class="small muted"></span></header>
+    <div class="body">
+      <div class="small muted">The road-facing property boundary on the service side. It does
+        not have to be straight — use as many vertices as the kerb needs.</div>
+      <div class="geo-stat" id="froStat"></div>
+      <div class="btn-row">
+        <button class="primary" id="froDraw">Draw frontage</button>
+        <button id="froUndo" disabled>Undo last point</button>
+        <button id="froFinish" disabled>Finish line</button>
+        <button id="froConfirm" disabled>Confirm</button>
+        <button id="froAdjust" disabled>Adjust</button>
+        <button id="froReset" disabled>Reset</button>
+      </div>
+      <label class="field" style="max-width:200px"><span>Road side</span>
+        <select id="froSide">
+          <option value="">—</option><option>NORTH</option><option>SOUTH</option>
+          <option>EAST</option><option>WEST</option></select></label>
+    </div>
+  </section>
+
+  <!-- =========================== service zone ========================= -->
+  <section class="card wf" id="c-zon" hidden>
+    <header><h2><span class="step-no">5</span>Service zone <span class="small muted">— Polygon</span></h2>
+      <div class="spacer"></div><span id="zon-state" class="small muted"></span></header>
+    <div class="body">
+      <div class="small muted">The realistic operational area where the collector stands, waste
+        is handed over and bins are placed. <b>Not</b> the whole property.</div>
+      <div class="geo-stat" id="zonStat"></div>
+      <div class="btn-row">
+        <button class="primary" id="zonDraw">Draw service zone</button>
+        <button id="zonUndo" disabled>Undo last point</button>
+        <button id="zonClose" disabled>Close polygon</button>
+        <button id="zonConfirm" disabled>Confirm</button>
+        <button id="zonAdjust" disabled>Adjust</button>
+        <button id="zonReset" disabled>Reset</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================= frontage evidence ====================== -->
+  <section class="card wf" id="c-photo" hidden>
+    <header><h2><span class="step-no">6</span>Frontage evidence</h2>
+      <div class="spacer"></div><span class="small muted" id="ph-count"></span></header>
+    <div class="body">
+      <div class="btn-row">
+        <label class="btn primary" for="camIn">Capture frontage photo</label>
+        <input id="camIn" type="file" accept="image/*" capture="environment">
+        <label class="btn" for="upIn">Upload test file</label>
+        <input id="upIn" type="file" accept="image/*">
+        <label class="btn" for="gateIn">Gate photo</label>
+        <input id="gateIn" type="file" accept="image/*" capture="environment">
+        <label class="btn" for="numIn">House number</label>
+        <input id="numIn" type="file" accept="image/*" capture="environment">
+      </div>
+      <div class="small muted"><b>Capture frontage photo</b> opens the device camera and is
+        stored as <code>DEVICE_CAMERA</code>. <b>Upload test file</b> exists for desktop
+        testing and is stored as <code>UPLOADED_FILE</code> — the two are distinguishable in
+        the database, not just on screen.</div>
+      <div id="photoGrid"></div>
+    </div>
+  </section>
+
+  <!-- =========================== survey quality ======================= -->
+  <section class="card wf" id="c-qual" hidden>
+    <header><h2><span class="step-no">7</span>Survey quality</h2></header>
+    <div class="body">
+      <div class="filters">
+        <label class="field"><span>Mapping confidence</span><select id="q_conf">
+          <option value="">—</option><option>HIGH</option><option>MEDIUM</option>
+          <option>LOW</option></select></label>
+        <label class="field grow"><span>Source class</span><select id="q_src">
+          <option value="">—</option><option>VERIFIED_FIELD_SURVEY</option>
+          <option>AUTHORITY_GIS</option><option>THIRD_PARTY_MAP</option>
+          <option>APPROXIMATE_GEOCODE</option><option>UNVERIFIED</option></select></label>
+      </div>
+      <div id="confNote"></div>
+      <div><div class="section-title">Anomalies</div>
+        <div class="row wrap" id="anomBox" style="gap:12px"></div></div>
+      <label class="field"><span>Notes</span>
+        <textarea id="q_notes" rows="3" placeholder="Anything the reviewer should know…"></textarea></label>
+    </div>
+  </section>
+
+  <!-- ============================== actions =========================== -->
+  <section class="card wf" id="c-submit" hidden>
+    <header><h2><span class="step-no">8</span>Actions</h2>
+      <div class="spacer"></div><span id="ready-pill"></span></header>
+    <div class="body">
+      <div id="readiness"></div>
+      <div class="btn-row">
+        <button id="saveBtn">Save draft</button>
+        <button class="primary" id="submitBtn">Submit for review</button>
+      </div>
+      <div class="note-box small"><b>Offline sync — future.</b> This screen needs a connection.
+        There is no local queue yet; the data model is built for one (idempotent actions on
+        stable ids, versioned geometry, capture time stored separately from save time) but the
+        client-side queue is not written.</div>
+    </div>
+  </section>
+</div>`;
+
+// ===========================================================================
+// state
+// ===========================================================================
+let PROP = null, SURVEY = null, GEO = {}, PHOTOS = [], THRESH = {}, VOCAB = {};
+let map = null, MODE = null;
+// Geometry drawn but not yet written to PostGIS, per kind.
+const PENDING = { entrance: null, frontage: null, service_zone: null };
+
+const KIND_META = {
+  entrance:     { draw: 'point',   colour: 'good',   label: 'Entrance' },
+  frontage:     { draw: 'line',    colour: 'accent', label: 'Frontage' },
+  service_zone: { draw: 'polygon', colour: 'violet', label: 'Service zone' }
+};
+
+const $ = WQ.$;
+const surveyorId = () => $('#q_surveyor').value || null;
+
+// ===========================================================================
+// map rendering
+// ===========================================================================
+function colour(name) {
+  return getComputedStyle(document.documentElement)
+    .getPropertyValue('--' + name).trim() || '#888';
+}
+
+function currentGeom(kind) {
+  if (PENDING[kind]) return PENDING[kind];
+  const g = GEO[kind];
+  return g && g.geom ? g.geom : null;
+}
+
+function paint() {
+  if (!map) return;
+  const feats = [];
+  const add = (geom, kind, pending) => {
+    if (geom) feats.push({ type: 'Feature', id: kind,
+                           properties: { kind: kind, pending: !!pending }, geometry: geom });
+  };
+  add(currentGeom('service_zone'), 'service_zone', PENDING.service_zone);
+  add(currentGeom('frontage'), 'frontage', PENDING.frontage);
+  if (SURVEY && SURVEY.captured_latitude != null && SURVEY.captured_longitude != null) {
+    feats.push({ type: 'Feature', id: 'fix', properties: { kind: 'fix' },
+                 geometry: { type: 'Point',
+                             coordinates: [SURVEY.captured_longitude, SURVEY.captured_latitude] } });
+  }
+  add(currentGeom('entrance'), 'entrance', PENDING.entrance);
+
+  map.setLayers([{
+    id: 'geom', type: 'mixed', data: { type: 'FeatureCollection', features: feats },
+    pickable: false,
+    style: (f) => {
+      const k = f.properties.kind;
+      const dash = f.properties.pending;
+      if (k === 'fix') return { fill: colour('warn'), stroke: '#000', radius: 5, alpha: 0.9 };
+      if (k === 'entrance') return { fill: colour('good'), stroke: '#000', radius: 7 };
+      if (k === 'frontage') return { stroke: colour('accent'), width: dash ? 2.5 : 3.5 };
+      return { fill: 'rgba(139,124,246,0.18)', stroke: colour('violet'), width: 2 };
+    }
+  }]);
+  if (feats.length) map.fitTo({ type: 'FeatureCollection', features: feats }, 70);
+}
+
+function setMode(m, text) {
+  MODE = m;
+  const bar = $('#modeBar');
+  bar.classList.toggle('on', !!m);
+  $('#modeTxt').innerHTML = m ? text : 'idle — pan and zoom';
+  // Only one drawing tool may be live at a time; anything else is a way to
+  // end up with a polygon vertex appended to a frontage line.
+  const STARTER = { entrance: 'entMark', frontage: 'froDraw', service_zone: 'zonDraw' };
+  Object.keys(STARTER).forEach(kind => {
+    const b = $('#' + STARTER[kind]);
+    if (b) b.disabled = !!m && m !== kind;
+  });
+  syncButtons();
+}
+
+// ===========================================================================
+// geometry tools
+// ===========================================================================
+function beginDraw(kind) {
+  if (!SURVEY) return WQ.toast('Open a property first', 'warn');
+  map.cancelDraw(); map.stopEdit();
+  PENDING[kind] = null;
+  paint();
+  const meta = KIND_META[kind];
+  setMode(kind, '<b>' + meta.label + '</b> — ' +
+    (kind === 'entrance' ? 'tap once on the map to place the point'
+     : kind === 'frontage' ? 'tap 2 or more points along the kerb, then Finish line'
+     : 'tap 3 or more points, then Close polygon'));
+  map.startDraw(meta.draw, (geo) => {
+    if (!geo) { setMode(null); paint(); return; }
+    PENDING[kind] = geo;
+    // A finished shape immediately becomes editable - "adjustable before
+    // submission" has to be true the moment it is drawn, not only after a
+    // round trip to the database.
+    map.startEdit(meta.draw, geo, (g) => { if (g) { PENDING[kind] = g; refreshGeomUI(); paint(); } });
+    setMode(kind, '<b>' + meta.label + '</b> — drag any handle to adjust, then Confirm');
+    refreshGeomUI();
+    paint();
+  });
+  refreshGeomUI();
+}
+
+function beginAdjust(kind) {
+  const g = currentGeom(kind);
+  if (!g) return;
+  map.cancelDraw(); map.stopEdit();
+  const meta = KIND_META[kind];
+  map.startEdit(meta.draw, g, (ng) => {
+    if (ng) { PENDING[kind] = ng; refreshGeomUI(); paint(); }
+  });
+  setMode(kind, '<b>' + meta.label + '</b> — drag any handle to adjust, then Confirm');
+  refreshGeomUI();
+}
+
+function resetKind(kind) {
+  map.cancelDraw(); map.stopEdit();
+  PENDING[kind] = null;
+  setMode(null);
+  refreshGeomUI();
+  paint();
+}
+
+async function confirmKind(kind) {
+  const geo = PENDING[kind];
+  if (!geo) return;
+  try {
+    const body = { kind: kind, geojson: geo, updated_by: surveyorId() };
+    if (kind === 'frontage' && $('#froSide').value) body.road_side = $('#froSide').value;
+    await WQ.api('/survey/api/surveys/' + encodeURIComponent(SURVEY.survey_id) + '/geometry',
+                 { method: 'PUT', body: body });
+    PENDING[kind] = null;
+    map.stopEdit();
+    setMode(null);
+    WQ.toast(KIND_META[kind].label + ' saved to PostGIS', 'good');
+    await reload();
+  } catch (e) { WQ.toast(e.message, 'crit'); }
+}
+
+// area of a polygon ring in m2, for the live preview only - the authoritative
+// number always comes back from ST_Area on the server.
+function ringArea(ring) {
+  if (!ring || ring.length < 4) return 0;
+  const R = 6378137, rad = Math.PI / 180;
+  let a = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x1, y1] = ring[i], [x2, y2] = ring[i + 1];
+    a += (x2 - x1) * rad * (2 + Math.sin(y1 * rad) + Math.sin(y2 * rad));
+  }
+  return Math.abs(a * R * R / 2);
+}
+
+function refreshGeomUI() {
+  const drawing = map && map.isDrawing();
+  const editing = map && map.isEditing();
+
+  // --- entrance ---
+  const eg = currentGeom('entrance');
+  $('#entReadout').hidden = !eg;
+  if (eg) {
+    $('#e_lat').textContent = eg.coordinates[1].toFixed(7);
+    $('#e_lon').textContent = eg.coordinates[0].toFixed(7);
+  }
+  $('#ent-state').textContent = PENDING.entrance ? 'unsaved — confirm to store'
+    : GEO.entrance ? 'saved · v' + (GEO.entrance.version || 1) : 'not marked';
+  $('#c-ent').classList.toggle('step-done', !!GEO.entrance && !PENDING.entrance);
+  $('#entConfirm').disabled = !PENDING.entrance;
+  $('#entAdjust').disabled = !eg || MODE === 'entrance';
+  $('#entReset').disabled = !PENDING.entrance;
+
+  // --- frontage ---
+  const fg = currentGeom('frontage');
+  const fpts = MODE === 'frontage' && drawing ? map.drawPointCount()
+             : fg ? fg.coordinates.length : 0;
+  $('#froStat').innerHTML = fg || fpts
+    ? 'points <span>' + fpts + '</span>' +
+      (GEO.frontage && !PENDING.frontage && GEO.frontage.length_m
+        ? ' · length <span>' + GEO.frontage.length_m + ' m</span>' : '')
+    : '';
+  $('#fro-state').textContent = PENDING.frontage ? 'unsaved — confirm to store'
+    : GEO.frontage ? 'saved · v' + (GEO.frontage.version || 1) : 'not drawn';
+  $('#c-fro').classList.toggle('step-done', !!GEO.frontage && !PENDING.frontage);
+  $('#froUndo').disabled = !(MODE === 'frontage' && drawing && map.drawPointCount() > 0);
+  $('#froFinish').disabled = !(MODE === 'frontage' && drawing && map.drawPointCount() >= 2);
+  $('#froConfirm').disabled = !PENDING.frontage;
+  $('#froAdjust').disabled = !fg || MODE === 'frontage';
+  $('#froReset').disabled = !(PENDING.frontage || (MODE === 'frontage' && drawing));
+
+  // --- service zone ---
+  const zg = currentGeom('service_zone');
+  const zpts = MODE === 'service_zone' && drawing ? map.drawPointCount()
+             : zg ? Math.max(zg.coordinates[0].length - 1, 0) : 0;
+  let zarea = null;
+  if (zg) zarea = Math.round(ringArea(zg.coordinates[0]) * 10) / 10;
+  $('#zonStat').innerHTML = zpts
+    ? 'vertices <span>' + zpts + '</span>' +
+      (zarea !== null ? ' · area <span>' + zarea + ' m²</span>' +
+        (PENDING.service_zone ? ' <span class="muted">(preview)</span>' : '') : '')
+    : '';
+  $('#zon-state').textContent = PENDING.service_zone ? 'unsaved — confirm to store'
+    : GEO.service_zone ? 'saved · v' + (GEO.service_zone.version || 1) : 'not drawn';
+  $('#c-zon').classList.toggle('step-done', !!GEO.service_zone && !PENDING.service_zone);
+  $('#zonUndo').disabled = !(MODE === 'service_zone' && drawing && map.drawPointCount() > 0);
+  $('#zonClose').disabled = !(MODE === 'service_zone' && drawing && map.drawPointCount() >= 3);
+  $('#zonConfirm').disabled = !PENDING.service_zone;
+  $('#zonAdjust').disabled = !zg || MODE === 'service_zone';
+  $('#zonReset').disabled = !(PENDING.service_zone || (MODE === 'service_zone' && drawing));
+
+  if (editing && MODE) {
+    $('#modeTxt').innerHTML = '<b>' + KIND_META[MODE].label +
+      '</b> — drag any handle to adjust, then Confirm';
+  }
+}
+
+function syncButtons() { refreshGeomUI(); }
+
+// ===========================================================================
+// device location
+// ===========================================================================
+let LASTFIX = null;
+
+function showFix(lat, lon, acc, when, src) {
+  $('#g_lat').textContent = lat.toFixed(7);
+  $('#g_lon').textContent = lon.toFixed(7);
+  const thr = THRESH.gnss_accuracy_warn_m || 10;
+  const cls = acc == null ? '' : acc > thr ? 'acc-bad' : acc > thr / 2 ? 'acc-warn' : 'acc-ok';
+  $('#g_acc').className = cls;
+  $('#g_acc').textContent = acc == null ? '—' : '±' + (Math.round(acc * 10) / 10) + ' m';
+  $('#g_at').textContent = when ? WQ.dateOf(when) : '—';
+  $('#loc-src').textContent = src || '';
+  $('#accWarn').innerHTML = (acc != null && acc > thr)
+    ? '<div class="warn-box">GPS accuracy is low. Retake location or adjust the point on ' +
+      'the map. Mapping confidence cannot be HIGH while the fix is worse than ±' + thr + ' m.</div>'
+    : '';
+}
+
+$('#fetchBtn').addEventListener('click', function () {
+  if (!SURVEY) return WQ.toast('Open a property first', 'warn');
+  if (!navigator.geolocation) {
+    return WQ.toast('No geolocation on this device — use “Simulate fix”.', 'warn', 6000);
+  }
+  const btn = this;
+  btn.disabled = true; btn.textContent = 'Locating…';
+  navigator.geolocation.getCurrentPosition((pos) => {
+    btn.disabled = false; btn.textContent = 'Fetch location';
+    LASTFIX = {
+      latitude: pos.coords.latitude, longitude: pos.coords.longitude,
+      accuracy_m: pos.coords.accuracy != null ? Math.round(pos.coords.accuracy * 10) / 10 : null,
+      source: 'DEVICE_GNSS', device: navigator.userAgent.slice(0, 60)
+    };
+    showFix(LASTFIX.latitude, LASTFIX.longitude, LASTFIX.accuracy_m, new Date().toISOString(),
+            'DEVICE_GNSS · not yet used');
+    $('#useBtn').disabled = false;
+    $('#retakeBtn').disabled = false;
+    WQ.toast('Fix acquired — press “Use location” to record it', 'accent');
+  }, (err) => {
+    btn.disabled = false; btn.textContent = 'Fetch location';
+    WQ.toast('Geolocation failed: ' + err.message + ' — “Simulate fix” works on desktop.',
+             'crit', 7000);
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+});
+
+$('#simBtn').addEventListener('click', () => {
+  if (!SURVEY) return WQ.toast('Open a property first', 'warn');
+  const base = [PROP.latitude || 12.2958, PROP.longitude || 76.6394];
+  const jitter = () => (Math.random() - 0.5) * 0.00012;
+  LASTFIX = {
+    latitude: base[0] + jitter(), longitude: base[1] + jitter(),
+    accuracy_m: Math.round((3 + Math.random() * 16) * 10) / 10,
+    source: 'SIMULATED', device: 'desktop simulation'
+  };
+  showFix(LASTFIX.latitude, LASTFIX.longitude, LASTFIX.accuracy_m, new Date().toISOString(),
+          'SIMULATED · not yet used');
+  $('#useBtn').disabled = false; $('#retakeBtn').disabled = false;
+});
+
+$('#retakeBtn').addEventListener('click', () => {
+  LASTFIX = null;
+  $('#useBtn').disabled = true; $('#retakeBtn').disabled = true;
+  showFix(0, 0, null, null, '');
+  $('#g_lat').textContent = '—'; $('#g_lon').textContent = '—';
+  WQ.toast('Discarded — fetch again', 'accent');
+});
+
+$('#useBtn').addEventListener('click', async () => {
+  if (!LASTFIX || !SURVEY) return;
+  try {
+    const r = await WQ.api('/survey/api/surveys/' + encodeURIComponent(SURVEY.survey_id) + '/location',
+      { method: 'POST', body: Object.assign({}, LASTFIX,
+        { captured_by: surveyorId(), set_entrance: !GEO.entrance }) });
+    if (r.accuracy_warning) WQ.toast(r.accuracy_warning, 'warn', 8000);
+    else WQ.toast('Device fix recorded', 'good');
+    LASTFIX = null;
+    $('#useBtn').disabled = true;
+    await reload();
+  } catch (e) { WQ.toast(e.message, 'crit'); }
+});
+
+$('#adjBtn').addEventListener('click', () => {
+  if (!currentGeom('entrance')) return WQ.toast('Mark the entrance first', 'warn');
+  beginAdjust('entrance');
+  document.getElementById('c-map').scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
+
+// ===========================================================================
+// photos
+// ===========================================================================
+async function sendPhoto(file, type, method) {
+  if (!file || !SURVEY) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  const qs = WQ.qs({
+    photo_type: type, captured_by: surveyorId(), capture_method: method,
+    latitude: SURVEY.captured_latitude, longitude: SURVEY.captured_longitude
+  });
+  try {
+    await WQ.api('/survey/api/surveys/' + encodeURIComponent(SURVEY.survey_id) + '/photos' + qs,
+                 { method: 'POST', body: fd });
+    WQ.toast(type.replace(/_/g, ' ').toLowerCase() + ' photo stored', 'good');
+    await reload();
+  } catch (e) { WQ.toast(e.message, 'crit'); }
+}
+
+$('#camIn').addEventListener('change', e => sendPhoto(e.target.files[0], 'FRONTAGE', 'DEVICE_CAMERA'));
+$('#upIn').addEventListener('change',  e => sendPhoto(e.target.files[0], 'FRONTAGE', 'UPLOADED_FILE'));
+$('#gateIn').addEventListener('change', e => sendPhoto(e.target.files[0], 'GATE', 'DEVICE_CAMERA'));
+$('#numIn').addEventListener('change', e => sendPhoto(e.target.files[0], 'HOUSE_NUMBER', 'DEVICE_CAMERA'));
+
+function renderPhotos() {
+  $('#ph-count').textContent = PHOTOS.length + ' photo(s)';
+  $('#photoGrid').innerHTML = PHOTOS.length
+    ? '<div class="photo-grid" style="margin-top:12px">' + PHOTOS.map(p =>
+        '<div class="photo-frame">' +
+        '<span class="photo-mark">' + WQ.esc(p.photo_type) +
+          (p.capture_method === 'DEVICE_CAMERA' ? ' · camera'
+           : p.capture_method === 'UPLOADED_FILE' ? ' · uploaded'
+           : p.capture_method === 'SEED_SAMPLE' ? ' · sample' : '') + '</span>' +
+        '<img alt="' + WQ.esc(p.photo_type) + '" src="/survey/api/photos/' +
+          encodeURIComponent(p.photo_id) + '/file" ' +
+          'onerror="this.parentNode.classList.add(\'empty\');this.remove()">' +
+        '</div>').join('') + '</div>'
+    : WQ.emptyState('No photo yet', 'A frontage photo is required before submission.');
+}
+
+// ===========================================================================
+// property panel
+// ===========================================================================
+const EDITABLE = [
+  ['owner_name', 'Owner name', 'text'],
+  ['owner_phone', 'Phone', 'tel'],
+  ['owner_email', 'Email', 'email'],
+  ['house_number', 'House number', 'text'],
+  ['street_name', 'Street', 'text'],
+  ['locality', 'Locality', 'text'],
+  ['pincode', 'PIN code', 'text']
+];
+
+function renderProperty() {
+  const p = PROP;
+  $('#p-chips').innerHTML = WQ.chip(p.survey_status) + WQ.chip(p.verification_status);
+  const sel = (id, val, opts) => '<select id="' + id + '"><option value="">—</option>' +
+    opts.map(o => '<option' + (o === val ? ' selected' : '') + '>' + WQ.esc(o) + '</option>')
+        .join('') + '</select>';
+
+  $('#p-body').innerHTML =
+    '<dl class="kv">' +
+      '<dt>WASTRAQ ID</dt><dd class="mono">' + WQ.esc(p.property_id) + '</dd>' +
+      '<dt>Authority ID</dt><dd class="mono">' + WQ.esc(p.authority_property_id || '—') + '</dd>' +
+      '<dt>Ward / route</dt><dd>' + WQ.esc(p.ward_name || '—') + ' · ' +
+        WQ.esc(p.route_id || '—') + '</dd>' +
+      '<dt>Address</dt><dd>' + WQ.esc(p.formatted_address || '—') + '</dd>' +
+      '<dt>Survey</dt><dd>' + WQ.chip(p.survey_status) +
+        (SURVEY ? ' <span class="mono small muted">' + WQ.esc(SURVEY.survey_id) + '</span>' : '') +
+        '</dd>' +
+      '<dt>Assignment</dt><dd class="mono small">' +
+        WQ.esc((SURVEY && SURVEY.assignment_id) || '—') + '</dd>' +
+      '<dt>Surveyor</dt><dd class="small">' + WQ.esc(p.surveyor_name || '—') + '</dd>' +
+      '<dt>Updated</dt><dd class="small muted">' +
+        (p.property_updated_at ? WQ.dateOf(p.property_updated_at) : '—') + '</dd>' +
+    '</dl>' +
+    '<div class="section-title" style="margin:14px 0 8px">Details you can edit on site</div>' +
+    '<div class="filters">' +
+      EDITABLE.map(([k, lbl, t]) =>
+        '<label class="field"><span>' + lbl + '</span><input id="f_' + k + '" type="' + t +
+        '" value="' + WQ.esc(p[k] || '') + '"></label>').join('') +
+      '<label class="field"><span>Property type</span>' +
+        sel('f_property_type', p.property_type, VOCAB.property_type || []) + '</label>' +
+      '<label class="field"><span>Service entity type</span>' +
+        sel('f_service_entity_type', p.service_entity_type, VOCAB.service_entity_type || []) +
+      '</label>' +
+    '</div>' +
+    '<div class="btn-row" style="margin-top:10px"><button id="savePropBtn">Save property details</button></div>' +
+    '<div class="small muted" style="margin-top:6px">Property ID, surveyor, assignment and ' +
+      'timestamps are filled in by the system — they are never typed here.</div>';
+
+  $('#savePropBtn').addEventListener('click', saveProperty);
+}
+
+async function saveProperty() {
+  const body = { updated_by: surveyorId() };
+  EDITABLE.forEach(([k]) => { body[k] = $('#f_' + k).value.trim() || null; });
+  body.property_type = $('#f_property_type').value || null;
+  body.service_entity_type = $('#f_service_entity_type').value || null;
+  Object.keys(body).forEach(k => { if (body[k] === null) delete body[k]; });
+  try {
+    await WQ.api('/survey/api/properties/' + encodeURIComponent(PROP.property_id),
+                 { method: 'PATCH', body: body });
+    WQ.toast('Property details saved', 'good');
+    await reload();
+  } catch (e) { WQ.toast(e.message, 'crit'); }
+}
+
+// ===========================================================================
+// quality + submit
+// ===========================================================================
+const ANOMALIES = ['SHARED_GATE', 'COMMON_COLLECTION_POINT', 'GATE_NOT_ON_ROAD',
+                   'UNDER_CONSTRUCTION', 'VACANT', 'ACCESS_BLOCKED', 'DISPUTED_BOUNDARY'];
+
+function renderQuality() {
+  $('#q_conf').value = (SURVEY && SURVEY.mapping_confidence) || '';
+  $('#q_src').value = (SURVEY && SURVEY.source_class) || '';
+  $('#q_notes').value = (SURVEY && SURVEY.notes) || '';
+  const have = (SURVEY && SURVEY.anomaly_type) || [];
+  $('#anomBox').innerHTML = ANOMALIES.map(a =>
+    '<label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" data-anom="' + a +
+    '"' + (have.indexOf(a) >= 0 ? ' checked' : '') + '><span class="small">' +
+    WQ.esc(a.replace(/_/g, ' ').toLowerCase()) + '</span></label>').join('');
+
+  const acc = SURVEY && SURVEY.location_accuracy_m;
+  const thr = THRESH.gnss_accuracy_warn_m || 10;
+  const poor = acc != null && acc > thr;
+  const opt = $('#q_conf').querySelector('option[value="HIGH"]');
+  if (opt) opt.disabled = poor;
+  $('#confNote').innerHTML = poor
+    ? '<div class="warn-box small">The recorded fix is ±' + acc + ' m. HIGH confidence is ' +
+      'unavailable while the fix is worse than ±' + thr + ' m — retake the location or ' +
+      'adjust the entrance on the map.</div>'
+    : '';
+}
+
+function draftBody() {
+  return {
+    mapping_confidence: $('#q_conf').value || null,
+    source_class: $('#q_src').value || null,
+    notes: $('#q_notes').value.trim() || null,
+    anomaly_type: WQ.$$('#anomBox input[data-anom]')
+      .filter(i => i.checked).map(i => i.dataset.anom)
+  };
+}
+
+async function saveDraft(quiet) {
+  if (!SURVEY) return;
+  try {
+    await WQ.api('/survey/api/surveys/' + encodeURIComponent(SURVEY.survey_id),
+                 { method: 'PATCH', body: draftBody() });
+    if (!quiet) WQ.toast('Draft saved', 'good');
+    await reload();
+  } catch (e) { WQ.toast(e.message, 'crit'); }
+}
+
+async function refreshReadiness() {
+  if (!SURVEY) return;
+  try {
+    const r = await WQ.api('/survey/api/surveys/' + encodeURIComponent(SURVEY.survey_id) + '/readiness');
+    THRESH = Object.assign(THRESH, r.thresholds || {});
+    $('#ready-pill').innerHTML = r.ready
+      ? '<span class="chip good"><span class="dot"></span>Ready to submit</span>'
+      : '<span class="chip warn"><span class="dot"></span>' + r.blockers.length + ' to fix</span>';
+    const g = r.geometry || {};
+    $('#readiness').innerHTML =
+      (r.blockers.length
+        ? '<div class="err-box"><b>Cannot submit yet</b><ul style="margin:6px 0 0 18px">' +
+          r.blockers.map(b => '<li>' + WQ.esc(b) + '</li>').join('') + '</ul></div>'
+        : '<div class="note-box">Everything required is present and valid. Submitting sends ' +
+          'this to the reviewer; it does not clear the property for operation on its own.</div>') +
+      (r.warnings && r.warnings.length
+        ? '<div class="warn-box" style="margin-top:8px"><b>Flagged for the reviewer</b>' +
+          '<ul style="margin:6px 0 0 18px">' +
+          r.warnings.map(w => '<li>' + WQ.esc(w) + '</li>').join('') + '</ul></div>'
+        : '') +
+      '<dl class="kv" style="margin-top:10px">' +
+        '<dt>Frontage</dt><dd class="small">' +
+          (g.frontage_points ? g.frontage_points + ' points · ' + (g.frontage_length_m || '?') + ' m'
+            : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Service zone</dt><dd class="small">' +
+          (g.zone_unique_points ? g.zone_unique_points + ' vertices · ' + (g.zone_area_m2 || '?') + ' m²'
+            : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Entrance → frontage</dt><dd class="small mono">' +
+          (g.entrance_to_frontage_m != null ? g.entrance_to_frontage_m + ' m' : '—') + '</dd>' +
+        '<dt>Entrance → zone</dt><dd class="small mono">' +
+          (g.entrance_to_zone_m != null ? g.entrance_to_zone_m + ' m' : '—') + '</dd>' +
+        '<dt>Frontage photo</dt><dd class="small">' +
+          (g.frontage_photos ? 'present' : '<span class="muted">missing</span>') + '</dd>' +
+      '</dl>';
+  } catch (e) {
+    $('#readiness').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+$('#saveBtn').addEventListener('click', () => saveDraft(false));
+
+$('#submitBtn').addEventListener('click', async function () {
+  if (!SURVEY) return;
+  await saveDraft(true);
+  const ok = await WQ.confirmDialog(
+    'Submit ' + PROP.property_id + ' for review? The reviewer decides whether it is cleared ' +
+    'for operation.', 'Submit for review', 'primary');
+  if (!ok) return;
+  this.disabled = true;
+  try {
+    const r = await WQ.api('/survey/api/surveys/' + encodeURIComponent(SURVEY.survey_id) + '/submit',
+                           { method: 'POST', body: { surveyor_id: surveyorId() } });
+    WQ.toast('Submitted — now in the review queue', 'good', 5000);
+    if (r.warnings && r.warnings.length) {
+      WQ.toast(r.warnings.length + ' geometry warning(s) sent with it', 'warn', 6000);
+    }
+    await reload();
+  } catch (e) { WQ.toast(e.message, 'crit', 8000); }
+  finally { this.disabled = false; }
+});
+
+// ===========================================================================
+// load
+// ===========================================================================
+async function reload() { if (PROP) await openProperty(PROP.property_id, true); }
+
+async function openProperty(pid, quiet) {
+  try {
+    const d = await WQ.api('/survey/api/properties/' + encodeURIComponent(pid) + '/survey');
+    PROP = d.property; SURVEY = d.survey; GEO = d.geometry || {};
+    PHOTOS = d.photos || []; THRESH = d.thresholds || {}; VOCAB = d.vocabulary || {};
+
+    if (!SURVEY) {
+      if (!surveyorId()) { WQ.toast('Pick a surveyor first', 'warn'); return; }
+      await WQ.api('/survey/api/properties/' + encodeURIComponent(pid) + '/survey',
+                   { method: 'POST', body: { surveyor_id: surveyorId() } });
+      return openProperty(pid, quiet);
+    }
+    if (SURVEY.surveyor_id && !quiet) $('#q_surveyor').value = SURVEY.surveyor_id;
+
+    WQ.$$('.wf').forEach(el => { el.hidden = false; });
+    renderProperty();
+    renderPhotos();
+    renderQuality();
+
+    if (!map) {
+      map = WQMap.create($('#fmap'),
+        { center: [PROP.latitude || 12.2958, PROP.longitude || 76.6394], zoom: 19 });
+      // Every vertex added or undone re-evaluates the tool buttons, so
+      // "Undo last point" and "Finish line" reflect the shape as it stands
+      // rather than as it was when the tool started.
+      map.on('drawprogress', () => refreshGeomUI());
+    }
+    Object.keys(PENDING).forEach(k => { PENDING[k] = null; });
+    map.cancelDraw(); map.stopEdit();
+    setMode(null);
+    paint();
+
+    if (SURVEY.captured_latitude != null) {
+      showFix(SURVEY.captured_latitude, SURVEY.captured_longitude,
+              SURVEY.location_accuracy_m, SURVEY.captured_at,
+              (SURVEY.location_source || '') + (SURVEY.manually_adjusted ? ' · adjusted' : ''));
+      $('#adjBtn').disabled = false;
+    }
+    await refreshReadiness();
+    if (!quiet) WQ.toast('Opened ' + pid, 'accent');
+  } catch (e) {
+    $('#p-body').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+// --- wiring ---------------------------------------------------------------
+$('#openBtn').addEventListener('click', () => {
+  const v = $('#q_pid').value.trim().toUpperCase();
+  if (v) openProperty(v);
+});
+$('#q_pid').addEventListener('keydown', e => { if (e.key === 'Enter') $('#openBtn').click(); });
+
+$('#entMark').addEventListener('click', () => beginDraw('entrance'));
+$('#entConfirm').addEventListener('click', () => confirmKind('entrance'));
+$('#entAdjust').addEventListener('click', () => beginAdjust('entrance'));
+$('#entReset').addEventListener('click', () => resetKind('entrance'));
+
+$('#froDraw').addEventListener('click', () => beginDraw('frontage'));
+$('#froUndo').addEventListener('click', () => { map.undoDrawPoint(); refreshGeomUI(); });
+$('#froFinish').addEventListener('click', () => map.finishDraw());
+$('#froConfirm').addEventListener('click', () => confirmKind('frontage'));
+$('#froAdjust').addEventListener('click', () => beginAdjust('frontage'));
+$('#froReset').addEventListener('click', () => resetKind('frontage'));
+
+$('#zonDraw').addEventListener('click', () => beginDraw('service_zone'));
+$('#zonUndo').addEventListener('click', () => { map.undoDrawPoint(); refreshGeomUI(); });
+$('#zonClose').addEventListener('click', () => map.finishDraw());
+$('#zonConfirm').addEventListener('click', () => confirmKind('service_zone'));
+$('#zonAdjust').addEventListener('click', () => beginAdjust('service_zone'));
+$('#zonReset').addEventListener('click', () => resetKind('service_zone'));
+
+$('#fitBtn').addEventListener('click', paint);
+let bm = true;
+$('#bmBtn').addEventListener('click', () => { bm = !bm; map.setBasemap(bm); });
+
+async function boot() {
+  try {
+    const users = await WQ.api('/survey/api/users' + WQ.qs({ role: 'SURVEYOR' }));
+    $('#q_surveyor').innerHTML = users.map(u =>
+      '<option value="' + WQ.esc(u.user_id) + '">' + WQ.esc(u.name) + '</option>').join('');
+    const saved = WQ.store.get('wq-surveyor', '');
+    if (saved && users.some(u => u.user_id === saved)) $('#q_surveyor').value = saved;
+    $('#q_surveyor').addEventListener('change', () => WQ.store.set('wq-surveyor', surveyorId()));
+  } catch (e) { WQ.toast('Surveyors: ' + e.message, 'crit'); }
+
+  const pid = WQ.param('property');
+  if (pid) { $('#q_pid').value = pid; openProperty(pid, true); }
+}
+boot();
+document.addEventListener('wq:theme', () => { if (map) paint(); });
+</script>
+</body>
+</html>

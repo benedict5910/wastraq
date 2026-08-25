@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wastraq — Live operations</title>
+<link rel="stylesheet" href="/assets/wq.css">
+<style>
+  .ops-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr); gap: 14px; align-items: start; }
+  @media (max-width: 1080px) { .ops-grid { grid-template-columns: 1fr; } }
+  #opsmap { height: 460px; }
+  @media (max-width: 700px) { #opsmap { height: 320px; } }
+  .feed-scroll { max-height: 460px; overflow-y: auto; }
+  .an-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
+</style>
+</head>
+<body>
+<script src="/assets/wq.js"></script>
+<script src="/assets/wq-map.js"></script>
+
+<div class="drawer-scrim" id="pd-scrim"></div>
+<aside class="drawer" id="pd">
+  <header>
+    <div class="stack" style="flex:1">
+      <h3 id="pd-title">Property</h3>
+      <span class="small muted" id="pd-sub"></span>
+    </div>
+    <button class="icon ghost" onclick="PD.close()">✕</button>
+  </header>
+  <div class="body" id="pd-body"></div>
+  <footer>
+    <button class="primary" id="pd-ev">View evidence</button>
+    <button onclick="PD.close()">Close</button>
+  </footer>
+</aside>
+
+<div class="modal-scrim" id="evm">
+  <div class="modal">
+    <header><h3 id="evm-title">Evidence</h3><div class="spacer" style="flex:1"></div>
+      <button class="icon ghost" onclick="EVM.close()">✕</button></header>
+    <div class="body" id="evm-body"></div>
+    <footer><button onclick="EVM.close()">Close</button></footer>
+  </div>
+</div>
+
+<script>
+const main = WQ.shell({
+  title: 'Live operations',
+  subtitle: 'Source segregation evidence — collection route',
+  suite: 'Operations',
+  user: 'Operator'
+});
+
+main.innerHTML = `
+  <div class="row wrap" style="gap:10px">
+    <label class="field" style="min-width:210px">
+      <span>Route / demo lane</span>
+      <select id="routeSel"></select>
+    </label>
+    <label class="field" style="min-width:150px">
+      <span>Auto refresh</span>
+      <div class="row">
+        <div class="seg" id="rateSeg">
+          <button data-s="5">5s</button><button data-s="10" class="on">10s</button><button data-s="30">30s</button>
+        </div>
+        <button id="pauseBtn" data-tip="Pause / resume polling">⏸</button>
+        <button id="nowBtn" data-tip="Refresh now">⟳</button>
+      </div>
+    </label>
+    <div class="spacer" style="flex:1"></div>
+    <span class="status-pill" id="refreshInfo"><span>—</span></span>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="ops-grid">
+    <section class="card">
+      <header>
+        <h2>Route map</h2>
+        <div class="spacer"></div>
+        <div class="seg" id="mapMode">
+          <button data-m="status" class="on">Collection state</button>
+          <button data-m="mapping">Mapping</button>
+        </div>
+        <button class="sm" id="basemapBtn" data-tip="Toggle the OpenStreetMap basemap">Basemap</button>
+      </header>
+      <div id="opsmap"></div>
+      <div class="body" style="padding:10px 16px">
+        <div class="legend" id="mapLegend"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <header>
+        <h2>Collection events</h2>
+        <div class="spacer"></div>
+        <span class="small muted" id="feedCount"></span>
+      </header>
+      <div class="body" style="padding:10px 12px; border-bottom:1px solid var(--line-1)">
+        <div class="filters">
+          <label class="field grow"><span>Search property / owner</span>
+            <input id="fq" placeholder="PROP-003, owner, house no."></label>
+          <label class="field"><span>Segregation</span>
+            <select id="fseg"><option value="">All</option>
+              <option value="SEGREGATED">Segregated</option>
+              <option value="NOT_SEGREGATED">Not segregated</option></select></label>
+          <label class="field"><span>Review</span>
+            <select id="frev"><option value="">All</option>
+              <option value="NEEDS_REVIEW">Needs review</option>
+              <option value="AUTO_CONFIRMED">Auto confirmed</option>
+              <option value="REVIEWED_OK">Reviewed OK</option>
+              <option value="REVIEWED_REJECTED">Reviewed rejected</option></select></label>
+          <label class="field"><span>Picker</span>
+            <select id="fpick"><option value="">All</option></select></label>
+          <label class="field"><span>Window</span>
+            <select id="fwin"><option value="">All time</option>
+              <option value="24">Last 24 h</option><option value="168">Last 7 days</option>
+              <option value="720">Last 30 days</option></select></label>
+        </div>
+      </div>
+      <div class="body flush feed-scroll"><div class="feed" id="feed"></div></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <header><h2>Analytics</h2><div class="spacer"></div>
+      <span class="small muted">computed in SQL over the selected route</span></header>
+    <div class="body an-grid" id="analytics"></div>
+  </section>
+
+  <section class="card">
+    <header><h2>Properties on this route</h2><div class="spacer"></div>
+      <span class="small muted" id="propCount"></span></header>
+    <div class="body flush tbl-wrap" style="max-height:420px">
+      <table class="tbl"><thead><tr>
+        <th>Property</th><th>Owner</th><th>Verification</th><th>Mapping</th>
+        <th class="num">Events</th><th class="num">Not segregated</th><th>Last collection</th>
+      </tr></thead><tbody id="propRows"></tbody></table>
+    </div>
+  </section>
+`;
+
+// ---------------------------------------------------------------- state ----
+const PD = WQ.drawer('pd');
+const EVM = WQ.modal('evm');
+let ROUTE = WQ.param('route', null);
+let MAPMODE = 'status';
+let STATE_BY_PROP = {};      // property_id -> operational state key
+let PROPS = [];
+let ZONES = null, ENTRANCES = null;
+let map = null, selected = null;
+
+function opsStateOf(p) {
+  if (!p) return 'MAPPED';
+  if (p.open_gis_issues > 0) return 'GIS_ISSUE';
+  if (p.review_status === 'NEEDS_REVIEW') return 'REVIEW';
+  if (p.segregation_status === 'NOT_SEGREGATED') return 'NOT_SEGREGATED';
+  if (p.segregation_status === 'SEGREGATED') return 'SERVICED';
+  if (!p.has_zone) return 'GIS_ISSUE';
+  return 'MAPPED';
+}
+
+// ------------------------------------------------------------------ map ----
+function initMap() {
+  map = WQMap.create(WQ.$('#opsmap'), { center: [12.29433, 76.64148], zoom: 18 });
+  map.setTooltip((f, layerId) => {
+    if (layerId !== 'zones') return '';
+    const pid = f.properties.property_id;
+    const st = STATE_BY_PROP[pid] || 'MAPPED';
+    return '<b>' + WQ.esc(pid) + '</b> · ' + WQ.esc(WQ.state(st).label);
+  });
+  map.on('click', (f, layerId) => {
+    if (f && f.properties && f.properties.property_id) openProperty(f.properties.property_id);
+  });
+  WQ.$('#basemapBtn').addEventListener('click', function () {
+    this.classList.toggle('on');
+    basemapOn = !basemapOn;
+    map.setBasemap(basemapOn);
+    WQ.toast(basemapOn ? 'Basemap on' : 'Basemap off (vector only)');
+  });
+  WQ.$$('#mapMode button').forEach(b => b.addEventListener('click', () => {
+    WQ.$$('#mapMode button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    MAPMODE = b.getAttribute('data-m');
+    paintMap();
+  }));
+}
+let basemapOn = true;
+
+async function loadGeometry() {
+  const [z, e] = await Promise.all([
+    WQ.api('/gis/layers/service-zones'),
+    WQ.api('/gis/layers/entrances')
+  ]);
+  // only the selected route's properties
+  const keep = new Set(PROPS.map(p => p.property_id));
+  ZONES = { type: 'FeatureCollection', features: z.features.filter(f => keep.has(f.properties.property_id)) };
+  ENTRANCES = { type: 'FeatureCollection', features: e.features.filter(f => keep.has(f.properties.property_id)) };
+  paintMap();
+  const b = map.boundsOf(ZONES.features.length ? ZONES : ENTRANCES);
+  if (b) map.fitBounds(b, 46);
+}
+
+function paintMap() {
+  if (!map || !ZONES) return;
+  const conf = (p) => (p && p.mapping_confidence !== null && p.mapping_confidence !== undefined)
+    ? Number(p.mapping_confidence) : 0;
+  map.setLayers([
+    {
+      id: 'zones', type: 'polygon', data: ZONES, pickable: true,
+      style: (f) => {
+        const pid = f.properties.property_id;
+        if (MAPMODE === 'mapping') {
+          const p = PROPS.find(x => x.property_id === pid);
+          const c = conf(p);
+          const tone = c >= 0.9 ? 'APPROVED' : c >= 0.7 ? 'MEDIUM' : 'LOW';
+          return { fill: WQ.stateColour(tone), stroke: WQ.stateColour(tone), width: 1.3 };
+        }
+        const st = STATE_BY_PROP[pid] || 'MAPPED';
+        return { fill: WQ.stateColour(st), stroke: WQ.stateColour(st), width: 1.3 };
+      }
+    },
+    {
+      id: 'entrances', type: 'point', data: ENTRANCES, pickable: true,
+      style: () => ({ fill: '#ffffff', stroke: 'rgba(0,0,0,0.45)', radius: 3 })
+    }
+  ]);
+  if (selected) map.select('zones', selected);
+  const keys = MAPMODE === 'mapping'
+    ? [['APPROVED', 'Confidence ≥ 0.90'], ['MEDIUM', '0.70 – 0.89'], ['LOW', '< 0.70']]
+    : [['SERVICED', 'Serviced / segregated'], ['NOT_SEGREGATED', 'Not segregated'],
+       ['REVIEW', 'Review required'], ['GIS_ISSUE', 'GIS issue'], ['MAPPED', 'Mapped, no event yet']];
+  WQ.$('#mapLegend').innerHTML = keys.map(([k, label]) =>
+    '<span><i style="background:' + WQ.stateColour(k) + '"></i>' + WQ.esc(label) + '</span>').join('') +
+    '<span><i style="background:#fff;border:1px solid var(--line-2)"></i>Entrance point</span>';
+}
+
+// ----------------------------------------------------------------- data ----
+async function loadRoutes() {
+  const rows = await WQ.api('/routes');
+  const sel = WQ.$('#routeSel');
+  const summary = await WQ.api('/summary');
+  if (!ROUTE) ROUTE = summary.route_id;
+  sel.innerHTML = rows.map(r =>
+    '<option value="' + WQ.esc(r.route_id) + '"' + (r.route_id === ROUTE ? ' selected' : '') + '>' +
+    WQ.esc(r.route_id) + ' — ' + WQ.num(r.properties) + ' properties' +
+    (r.events ? ' · ' + WQ.num(r.events) + ' events' : '') + '</option>').join('');
+  sel.addEventListener('change', async () => {
+    ROUTE = sel.value;
+    history.replaceState(null, '', '/dashboard?route=' + encodeURIComponent(ROUTE));
+    ZONES = null;
+    await refresh();
+    await loadGeometry();
+  });
+}
+
+async function refresh() {
+  const [summary, an, feed] = await Promise.all([
+    WQ.api('/summary' + WQ.qs({ route_id: ROUTE })),
+    WQ.api('/analytics/operations' + WQ.qs({ route_id: ROUTE })),
+    WQ.api('/collection-events/feed/detailed' + WQ.qs(feedFilters()))
+  ]);
+  renderKpis(summary.totals, an.totals);
+  renderAnalytics(an);
+  renderFeed(feed);
+  await renderProperties(an.by_property, summary.events);
+  WQ.setNavBadge('review', summary.totals.needs_review || 0);
+  if (!ZONES) await loadGeometry(); else paintMap();
+}
+
+function feedFilters() {
+  return {
+    route_id: ROUTE,
+    q: WQ.$('#fq').value.trim() || null,
+    segregation_status: WQ.$('#fseg').value || null,
+    review_status: WQ.$('#frev').value || null,
+    picker_id: WQ.$('#fpick').value || null,
+    since_hours: WQ.$('#fwin').value || null,
+    limit: 120
+  };
+}
+
+function renderKpis(t, a) {
+  WQ.$('#kpis').innerHTML = [
+    WQ.kpi({ label: 'Mapped properties', value: WQ.num(t.properties), tone: '',
+             sub: WQ.num(t.service_zones) + ' service zones' }),
+    WQ.kpi({ label: 'Serviced today', value: WQ.num(t.serviced_today), tone: 'good',
+             sub: WQ.pct(a.completion_pct) + ' of the route ever serviced', bar: a.completion_pct }),
+    WQ.kpi({ label: 'Segregated', value: WQ.num(t.segregated), tone: 'good',
+             sub: WQ.pct(a.segregation_compliance_pct) + ' compliance', bar: a.segregation_compliance_pct }),
+    WQ.kpi({ label: 'Not segregated', value: WQ.num(t.not_segregated), tone: 'crit',
+             sub: WQ.num(a.rfid_triggered) + ' raised by RFID' }),
+    WQ.kpi({ label: 'Pending review', value: WQ.num(t.needs_review), tone: 'warn',
+             sub: WQ.num(a.low_confidence_events) + ' low-confidence events' }),
+    WQ.kpi({ label: 'Evidence packages', value: WQ.num(t.evidence), tone: '',
+             sub: WQ.num(t.frontage_photos) + ' frontage photos' }),
+    WQ.kpi({ label: 'Active pickers', value: WQ.num(t.active_pickers), tone: 'violet' }),
+    WQ.kpi({ label: 'Mapping coverage', value: WQ.pct(a.mapping_coverage_pct), tone: 'good',
+             sub: t.open_gis_issues ? WQ.num(t.open_gis_issues) + ' open GIS issues' : 'no open GIS issues',
+             bar: a.mapping_coverage_pct })
+  ].join('');
+}
+
+function meter(label, value, total, tone) {
+  const p = total ? Math.round(1000 * value / total) / 10 : 0;
+  return '<div class="meter"><span class="small dim">' + WQ.esc(label) + '</span>' +
+    '<span class="small mono">' + WQ.num(value) + ' · ' + p + '%</span>' +
+    '<div class="m-track"><i style="width:' + p + '%;background:' + WQ.stateColour(tone) + '"></i></div></div>';
+}
+
+function renderAnalytics(an) {
+  const t = an.totals;
+  const pick = an.by_picker.filter(p => p.events > 0);
+  WQ.$('#analytics').innerHTML =
+    '<div class="stack" style="gap:12px">' +
+      '<div class="section-title">Compliance</div>' +
+      meter('Segregation compliance', t.segregated, t.events || 1, 'APPROVED') +
+      meter('Non-segregation', t.not_segregated, t.events || 1, 'NOT_SEGREGATED') +
+      meter('Collection completion', t.properties_with_events, t.properties || 1, 'SUBMITTED') +
+      meter('Mapping coverage', t.mapped_zones, t.properties || 1, 'HIGH') +
+    '</div>' +
+    '<div class="stack" style="gap:10px">' +
+      '<div class="section-title">Association quality</div>' +
+      '<div class="kv">' +
+        '<dt>Average confidence</dt><dd class="mono">' + (t.avg_confidence ?? '—') + '</dd>' +
+        '<dt>Low confidence (&lt;0.85)</dt><dd>' + WQ.num(t.low_confidence_events) + '</dd>' +
+        '<dt>Needs review</dt><dd>' + WQ.num(t.needs_review) + '</dd>' +
+        '<dt>Open GIS issues</dt><dd>' + WQ.num(t.open_gis_issues) + '</dd>' +
+        '<dt>RFID triggered</dt><dd>' + WQ.num(t.rfid_triggered) + '</dd>' +
+      '</div>' +
+      '<div class="note-box small">Ambiguous coordinates never create an event — the lookup returns ' +
+      'the candidates and the API answers 409.</div>' +
+    '</div>' +
+    '<div class="stack" style="gap:10px">' +
+      '<div class="section-title">Pickers</div>' +
+      (pick.length ? pick.map(p =>
+        '<div class="row" style="justify-content:space-between">' +
+          '<div class="stack"><span>' + WQ.esc(p.picker_name || p.picker_id) + '</span>' +
+          '<span class="small muted mono">' + WQ.esc(p.picker_id) + ' · last ' + WQ.ago(p.last_event) + '</span></div>' +
+          '<div class="right small"><div>' + WQ.num(p.events) + ' events</div>' +
+          '<div class="muted">' + WQ.num(p.not_segregated) + ' not segregated</div></div>' +
+        '</div>').join('') : WQ.emptyState('No picker activity on this route yet')) +
+    '</div>';
+}
+
+function renderFeed(rows) {
+  WQ.$('#feedCount').textContent = rows.length + ' shown';
+  if (!rows.length) {
+    WQ.$('#feed').innerHTML = WQ.emptyState('No events match these filters',
+      'Run <span class="mono">python3 simulation/simulate_picker.py</span> to generate some.');
+    return;
+  }
+  WQ.$('#feed').innerHTML = rows.map(r => {
+    const cls = r.segregation_status === 'NOT_SEGREGATED' ? 'is-crit'
+              : r.review_status === 'NEEDS_REVIEW' ? 'is-warn' : 'is-good';
+    return '<div class="ev ' + cls + '" data-prop="' + WQ.esc(r.property_id) + '" data-ev="' + WQ.esc(r.event_id) + '">' +
+      '<div class="t">' + WQ.timeOf(r.collection_time) + '</div>' +
+      '<div><div class="ttl">' + WQ.esc(r.property_id) + ' ' +
+        (r.segregation_status === 'NOT_SEGREGATED' ? 'flagged' : 'serviced') +
+        (r.house_number ? ' <span class="muted small">· ' + WQ.esc(r.house_number) + '</span>' : '') + '</div>' +
+      '<div class="row wrap" style="gap:6px;margin-top:5px">' +
+        WQ.chip(r.segregation_status) +
+        (r.rfid_triggered ? '<span class="chip warn"><span class="dot"></span>RFID trigger</span>' : '') +
+        (r.review_status === 'NEEDS_REVIEW' ? WQ.chip('NEEDS_REVIEW') : '') +
+        (Number(r.evidence_count) ? '<span class="chip accent"><span class="dot"></span>' +
+          r.evidence_count + ' evidence</span>' : '') +
+      '</div>' +
+      '<div class="meta">' + WQ.esc(r.picker_name || r.picker_id || 'unassigned') +
+        ' · confidence ' + (r.association_confidence ?? '—') +
+        ' · ' + WQ.esc(r.event_id) + '</div></div></div>';
+  }).join('');
+  WQ.$$('#feed .ev').forEach(el => el.addEventListener('click', () => {
+    openProperty(el.getAttribute('data-prop'), el.getAttribute('data-ev'));
+  }));
+}
+
+async function renderProperties(byProp, summaryEvents) {
+  PROPS = await WQ.api('/properties' + WQ.qs({ route_id: ROUTE }));
+  const evByProp = {};
+  (summaryEvents || []).forEach(e => { if (!evByProp[e.property_id]) evByProp[e.property_id] = e; });
+  const stats = {};
+  (byProp || []).forEach(r => stats[r.property_id] = r);
+
+  STATE_BY_PROP = {};
+  PROPS.forEach(p => {
+    const last = evByProp[p.property_id];
+    STATE_BY_PROP[p.property_id] = opsStateOf(last ? {
+      segregation_status: last.segregation_status,
+      review_status: last.review_status,
+      has_zone: true, open_gis_issues: 0
+    } : { has_zone: true, open_gis_issues: 0 });
+  });
+
+  WQ.$('#propCount').textContent = PROPS.length + ' properties';
+  WQ.$('#propRows').innerHTML = PROPS.map(p => {
+    const s = stats[p.property_id] || {};
+    const last = evByProp[p.property_id];
+    const conf = Number(p.mapping_confidence || 0);
+    return '<tr class="clickable" data-prop="' + WQ.esc(p.property_id) + '">' +
+      '<td><div class="stack"><b>' + WQ.esc(p.property_id) + '</b>' +
+        '<span class="small muted">' + WQ.esc(p.house_number || '') + '</span></div></td>' +
+      '<td>' + WQ.esc(p.owner_name || '—') + '</td>' +
+      '<td>' + WQ.chip(p.verification_status) + '</td>' +
+      '<td class="mono small">' + (conf ? conf.toFixed(3) : '—') + '</td>' +
+      '<td class="num">' + WQ.num(s.events || 0) + '</td>' +
+      '<td class="num">' + (Number(s.not_segregated) ? '<span class="chip crit"><span class="dot"></span>' +
+        s.not_segregated + '</span>' : '<span class="muted">0</span>') + '</td>' +
+      '<td class="small">' + (last ? WQ.timeOf(last.collection_time) + ' ' + WQ.chip(last.segregation_status) : '<span class="muted">never</span>') + '</td>' +
+      '</tr>';
+  }).join('');
+  WQ.$$('#propRows tr').forEach(tr => tr.addEventListener('click', () => openProperty(tr.getAttribute('data-prop'))));
+}
+
+// ------------------------------------------------------------- drawer ------
+let drawerEvent = null;
+async function openProperty(pid, eventId) {
+  selected = pid;
+  if (map) { map.select('zones', pid); }
+  PD.open();
+  WQ.$('#pd-title').textContent = pid;
+  WQ.$('#pd-sub').textContent = 'loading…';
+  WQ.$('#pd-body').innerHTML = '<div class="skel" style="height:160px"></div>';
+  try {
+    const [p, events] = await Promise.all([
+      WQ.api('/properties/' + encodeURIComponent(pid)),
+      WQ.api('/properties/' + encodeURIComponent(pid) + '/events')
+    ]);
+    const last = events[0];
+    drawerEvent = eventId || (last && last.event_id) || null;
+    WQ.$('#pd-sub').textContent = (p.house_number || '') + ' · ' + (p.route_id || '');
+    const zoneArea = p.service_zone_area_m2;
+    WQ.$('#pd-body').innerHTML =
+      '<div class="row wrap" style="gap:6px">' + WQ.chip(p.verification_status) +
+        (p.geometry_verified === false ? '<span class="chip warn"><span class="dot"></span>Provisional geometry</span>' : '') +
+        (last ? WQ.chip(last.segregation_status) : '<span class="chip neutral"><span class="dot"></span>No collection yet</span>') +
+      '</div>' +
+      (p.frontage_photo_id
+        ? '<div><div class="section-title" style="margin-bottom:6px">Frontage photo</div>' +
+          '<div class="photo-frame"><img loading="lazy" alt="Frontage of ' + WQ.esc(pid) + '" ' +
+          'src="/properties/' + encodeURIComponent(pid) + '/photo" ' +
+          'onerror="this.parentNode.innerHTML=\'<div class=&quot;empty small&quot;>Photo file not on disk</div>\'"></div></div>'
+        : '<div class="note-box small">No frontage photo linked.</div>') +
+      '<div><div class="section-title">Property</div><dl class="kv">' +
+        '<dt>Owner</dt><dd>' + WQ.esc(p.owner_name || '—') + '</dd>' +
+        '<dt>House number</dt><dd>' + WQ.esc(p.house_number || '—') + '</dd>' +
+        '<dt>Address</dt><dd>' + WQ.esc(p.formatted_address || '—') + '</dd>' +
+        '<dt>Authority ID</dt><dd class="mono">' + WQ.esc(p.authority_property_id || '—') + '</dd>' +
+        '<dt>Type</dt><dd>' + WQ.esc(p.property_type) + '</dd>' +
+        '<dt>Mapping conf.</dt><dd class="mono">' + (p.mapping_confidence ?? '—') + '</dd>' +
+      '</dl></div>' +
+      '<div><div class="section-title">GIS structure</div><dl class="kv">' +
+        '<dt>Entrance</dt><dd>' + (p.entrance_geojson ? 'mapped' : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Frontage</dt><dd>' + (p.frontage_geojson ? 'mapped · ' + WQ.esc(p.road_side || '') : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Service zone</dt><dd>' + (p.service_zone_geojson
+            ? WQ.esc(p.zone_id) + (zoneArea ? ' · ' + zoneArea + ' m²' : '') : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Source</dt><dd class="small">' + WQ.esc(p.geometry_source || '—') + '</dd>' +
+      '</dl></div>' +
+      '<div><div class="section-title">Last collection</div>' +
+      (last ? '<dl class="kv">' +
+        '<dt>Event</dt><dd class="mono">' + WQ.esc(last.event_id) + '</dd>' +
+        '<dt>Time</dt><dd>' + WQ.dateOf(last.collection_time) + ' ' + WQ.timeOf(last.collection_time) + '</dd>' +
+        '<dt>Segregation</dt><dd>' + WQ.chip(last.segregation_status) + '</dd>' +
+        '<dt>Picker</dt><dd>' + WQ.esc(last.picker_id || '—') + '</dd>' +
+        '<dt>Confidence</dt><dd class="mono">' + (last.association_confidence ?? '—') + '</dd>' +
+        '<dt>Review</dt><dd>' + WQ.chip(last.review_status) + '</dd>' +
+        '<dt>RFID</dt><dd>' + (last.rfid_triggered ? 'triggered' : '<span class="muted">no</span>') + '</dd>' +
+        '</dl>' : '<div class="note-box small">No collection event recorded for this property yet.</div>') +
+      '</div>' +
+      '<div><div class="section-title">Collection history</div>' +
+      (events.length ? '<div class="tbl-wrap" style="max-height:180px"><table class="tbl"><tbody>' +
+        events.slice(0, 20).map(e => '<tr><td class="mono small">' + WQ.esc(e.event_id) + '</td>' +
+          '<td class="small">' + WQ.timeOf(e.collection_time) + '</td>' +
+          '<td>' + WQ.chip(e.segregation_status) + '</td></tr>').join('') +
+        '</tbody></table></div>' : '<div class="muted small">none</div>') + '</div>' +
+      '<div><a href="/survey/field?property=' + encodeURIComponent(pid) + '">Open in the survey module →</a></div>';
+    WQ.$('#pd-ev').disabled = !drawerEvent;
+  } catch (e) {
+    WQ.$('#pd-body').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+WQ.$('#pd-ev').addEventListener('click', () => { if (drawerEvent) openEvidence(drawerEvent); });
+
+async function openEvidence(eventId) {
+  EVM.open();
+  WQ.$('#evm-title').textContent = 'Evidence — ' + eventId;
+  WQ.$('#evm-body').innerHTML = '<div class="skel" style="height:120px"></div>';
+  try {
+    const [ev, items] = await Promise.all([
+      WQ.api('/collection-events/' + encodeURIComponent(eventId)),
+      WQ.api('/collection-events/' + encodeURIComponent(eventId) + '/evidence')
+    ]);
+    const p = await WQ.api('/properties/' + encodeURIComponent(ev.property_id));
+    WQ.$('#evm-body').innerHTML =
+      '<div class="row wrap" style="gap:6px;margin-bottom:14px">' +
+        WQ.chip(ev.segregation_status) + WQ.chip(ev.review_status) +
+        (ev.rfid_triggered ? '<span class="chip warn"><span class="dot"></span>RFID trigger</span>' : '') +
+      '</div>' +
+      '<dl class="kv" style="margin-bottom:16px">' +
+        '<dt>Property</dt><dd>' + WQ.esc(ev.property_id) + ' — ' + WQ.esc(p.owner_name || '') + '</dd>' +
+        '<dt>Picker</dt><dd>' + WQ.esc(ev.picker_id || '—') + '</dd>' +
+        '<dt>Collected</dt><dd>' + WQ.dateOf(ev.collection_time) + ' ' + WQ.timeOf(ev.collection_time) + '</dd>' +
+        '<dt>Track</dt><dd class="mono">' + WQ.esc(ev.track_id || '—') + '</dd>' +
+        '<dt>Confidence</dt><dd class="mono">' + (ev.association_confidence ?? '—') + '</dd>' +
+      '</dl>' +
+      '<div class="section-title" style="margin-bottom:8px">Reference frontage photo</div>' +
+      (p.frontage_photo_id
+        ? '<div class="photo-frame" style="max-width:340px"><img alt="Frontage" src="/properties/' +
+          encodeURIComponent(ev.property_id) + '/photo" onerror="this.parentNode.innerHTML=' +
+          '\'<div class=&quot;empty small&quot;>Photo file not on disk</div>\'"></div>'
+        : '<div class="note-box small">No frontage reference photo.</div>') +
+      '<div class="section-title" style="margin:16px 0 8px">Evidence records (' + items.length + ')</div>' +
+      (items.length
+        ? '<table class="tbl"><thead><tr><th>ID</th><th>Type</th><th>Captured</th><th>Verified</th><th>File</th></tr></thead><tbody>' +
+          items.map(i => '<tr><td class="mono small">' + WQ.esc(i.evidence_id) + '</td>' +
+            '<td>' + WQ.esc(i.evidence_type.replace(/_/g, ' ').toLowerCase()) + '</td>' +
+            '<td class="small">' + WQ.dateOf(i.captured_at) + ' ' + WQ.timeOf(i.captured_at) + '</td>' +
+            '<td>' + (i.verified ? WQ.chip('APPROVED', 'Verified') : '<span class="chip neutral"><span class="dot"></span>Unverified</span>') + '</td>' +
+            '<td class="mono small muted">' + WQ.esc(i.file_path) + '</td></tr>').join('') +
+          '</tbody></table>' +
+          '<div class="note-box small" style="margin-top:12px">Evidence file paths are placeholders in the demo — ' +
+          'the camera/video capture that fills them is not wired up yet.</div>'
+        : WQ.emptyState('No evidence linked to this event'));
+  } catch (e) {
+    WQ.$('#evm-body').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+// ------------------------------------------------------------- wiring ------
+async function loadPickers() {
+  const ps = await WQ.api('/pickers');
+  WQ.$('#fpick').innerHTML = '<option value="">All</option>' +
+    ps.map(p => '<option value="' + WQ.esc(p.picker_id) + '">' + WQ.esc(p.picker_name) + '</option>').join('');
+}
+
+let debounce = null;
+['#fq', '#fseg', '#frev', '#fpick', '#fwin'].forEach(sel => {
+  WQ.$(sel).addEventListener('input', () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => auto.now(), 260);
+  });
+});
+
+const auto = WQ.autoRefresh(refresh, 10);
+auto.onChange(s => {
+  WQ.$('#refreshInfo').innerHTML = '<span>' +
+    (s.paused ? 'paused' : 'auto ' + s.seconds + 's') +
+    (s.last ? ' · updated ' + s.last.toLocaleTimeString() : '') + '</span>';
+  WQ.$('#pauseBtn').textContent = s.paused ? '▶' : '⏸';
+});
+WQ.$('#pauseBtn').addEventListener('click', () => auto.toggle());
+WQ.$('#nowBtn').addEventListener('click', () => auto.now());
+WQ.$$('#rateSeg button').forEach(b => b.addEventListener('click', () => {
+  WQ.$$('#rateSeg button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  auto.setInterval(Number(b.getAttribute('data-s')));
+}));
+
+(async function boot() {
+  initMap();
+  try {
+    await loadRoutes();
+    await loadPickers();
+  } catch (e) { WQ.toast('Startup: ' + e.message, 'crit'); }
+  auto.start();
+})();
+document.addEventListener('wq:theme', () => paintMap());
+</script>
+</body>
+</html>

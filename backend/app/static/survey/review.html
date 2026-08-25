@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wastraq — Review queue</title>
+<link rel="stylesheet" href="/assets/wq.css">
+<style>
+  .rev { display: grid; grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+         gap: 14px; align-items: start; }
+  @media (max-width: 1080px) { .rev { grid-template-columns: 1fr; } }
+  #revmap { height: 320px; }
+  .queue { max-height: calc(100vh - 260px); overflow: auto; }
+  .qrow { display: flex; gap: 10px; align-items: flex-start; padding: 11px 14px;
+          border-bottom: 1px solid var(--line-1); cursor: pointer;
+          transition: background .12s var(--ease); }
+  .qrow:hover { background: var(--surface-2); }
+  .qrow.on { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
+  .qrow .qi { flex: 1; min-width: 0; }
+  .qrow .qi div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ev { display: grid; grid-template-columns: minmax(0,1fr) minmax(260px,320px); gap: 14px; }
+  @media (max-width: 900px) { .ev { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<script src="/assets/wq.js"></script>
+<script src="/assets/wq-map.js"></script>
+
+<div class="modal-scrim" id="photom">
+  <div class="modal" style="max-width:900px">
+    <header><h3 id="pm-title">Frontage photo</h3><div class="spacer"></div>
+      <button class="icon ghost" onclick="PM.close()">✕</button></header>
+    <div class="body" id="pm-body"></div>
+    <footer><button onclick="PM.close()">Close</button></footer>
+  </div>
+</div>
+
+<script>
+const main = WQ.shell({
+  title: 'Review queue',
+  subtitle: 'Approve a survey, or return it to the surveyor',
+  suite: 'Survey', user: 'Reviewer'
+});
+
+main.innerHTML = `
+  <div class="row wrap">
+    <label class="field"><span>Reviewing as</span><select id="me"></select></label>
+    <label class="field"><span>Show</span><select id="f_status">
+      <option value="SUBMITTED">Awaiting review</option>
+      <option value="CORRECTION_REQUIRED">Returned for correction</option>
+      <option value="APPROVED">Approved</option>
+      <option value="">All</option></select></label>
+    <div class="spacer" style="flex:1"></div>
+    <span class="small muted" id="lastq"></span>
+    <button id="reload">Refresh</button>
+  </div>
+
+  <div class="rev">
+    <section class="card">
+      <header><h2>Queue</h2><div class="spacer"></div>
+        <span class="small muted" id="qn">—</span></header>
+      <div class="body flush queue" id="queue"></div>
+    </section>
+
+    <section class="card">
+      <header><h2 id="rv-title">Select a survey</h2><div class="spacer"></div>
+        <span id="rv-chips" class="row" style="gap:6px"></span></header>
+      <div class="body" id="rv-body">
+        ${WQ.emptyState('Nothing selected',
+          'Pick a survey from the queue to see its photo, geometry and quality flags.')}
+      </div>
+    </section>
+  </div>
+`;
+
+const PM = WQ.modal('photom');
+let QUEUE = [], CUR = null, map = null;
+
+const meId = () => WQ.$('#me').value;
+
+function renderQueue() {
+  WQ.$('#qn').textContent = QUEUE.length + ' survey' + (QUEUE.length === 1 ? '' : 's');
+  WQ.$('#queue').innerHTML = QUEUE.length ? QUEUE.map(s =>
+    '<div class="qrow' + (CUR && CUR.survey && CUR.survey.survey_id === s.survey_id ? ' on' : '') +
+      '" data-prop="' + WQ.esc(s.property_id) + '">' +
+      '<div class="qi">' +
+        '<b class="mono">' + WQ.esc(s.property_id) + '</b>' +
+        '<div class="small muted">' + WQ.esc(s.house_number || '—') + ' · ' +
+          WQ.esc(s.formatted_address || '') + '</div>' +
+        '<div class="small muted">' + WQ.esc(s.surveyor_name || '—') + ' · ' +
+          (s.submitted_at ? WQ.ago(s.submitted_at) : 'not submitted') + '</div>' +
+      '</div>' +
+      '<div class="stack" style="align-items:flex-end;gap:4px">' +
+        WQ.chip(s.survey_status) +
+        (s.mapping_confidence ? WQ.chip(s.mapping_confidence) : '') +
+      '</div>' +
+    '</div>').join('')
+    : WQ.emptyState('Queue is empty',
+        'Nothing is waiting. Surveys appear here when a surveyor submits one.');
+  WQ.$$('.qrow').forEach(el => el.addEventListener('click', () => open(el.dataset.prop)));
+  WQ.setNavBadge('review', WQ.$('#f_status').value === 'SUBMITTED' ? QUEUE.length : 0);
+}
+
+async function loadQueue(keep) {
+  WQ.$('#queue').innerHTML = '<div style="padding:14px">' +
+    '<div class="skel" style="height:62px"></div>' +
+    '<div class="skel" style="height:62px;margin-top:8px"></div></div>';
+  try {
+    QUEUE = await WQ.api('/survey/api/surveys' + WQ.qs({
+      survey_status: WQ.$('#f_status').value || null, limit: 200 }));
+    renderQueue();
+    WQ.$('#lastq').textContent = 'updated ' +
+      new Date().toLocaleTimeString([], { hour12: false });
+    if (!keep && !CUR && QUEUE.length) open(QUEUE[0].property_id);
+  } catch (e) {
+    WQ.$('#queue').innerHTML = '<div style="padding:14px"><div class="err-box">' +
+      WQ.esc(e.message) + '</div></div>';
+  }
+}
+
+function geomLayers(g, s) {
+  const L = [];
+  const col = (n) => getComputedStyle(document.documentElement)
+    .getPropertyValue('--' + n).trim() || '#888';
+  if (g.service_zone && g.service_zone.geom)
+    L.push({ id: 'zone', type: 'polygon',
+             data: { type: 'Feature', geometry: g.service_zone.geom, properties: { t: 'Service zone' } },
+             style: () => ({ fill: 'rgba(139,124,246,0.18)', stroke: col('violet'), width: 2 }) });
+  if (g.frontage && g.frontage.geom)
+    L.push({ id: 'front', type: 'line',
+             data: { type: 'Feature', geometry: g.frontage.geom, properties: { t: 'Frontage' } },
+             style: () => ({ stroke: col('accent'), width: 3.5 }) });
+  if (s && s.captured_latitude != null)
+    L.push({ id: 'gnss', type: 'point',
+             data: { type: 'Feature', properties: { t: 'Raw GNSS fix' },
+                     geometry: { type: 'Point',
+                                 coordinates: [s.captured_longitude, s.captured_latitude] } },
+             style: () => ({ fill: col('warn'), stroke: '#000', radius: 5 }) });
+  if (g.entrance && g.entrance.geom)
+    L.push({ id: 'ent', type: 'point',
+             data: { type: 'Feature', geometry: g.entrance.geom, properties: { t: 'Entrance' } },
+             style: () => ({ fill: col('good'), stroke: '#000', radius: 7 }) });
+  return L;
+}
+
+async function open(propertyId) {
+  WQ.$('#rv-title').textContent = propertyId;
+  WQ.$('#rv-chips').innerHTML = '';
+  WQ.$('#rv-body').innerHTML = '<div class="skel" style="height:280px"></div>';
+  try {
+    CUR = await WQ.api('/survey/api/properties/' + encodeURIComponent(propertyId) + '/survey');
+    renderDetail(CUR);
+    renderQueue();
+  } catch (e) {
+    WQ.$('#rv-body').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+function renderDetail(d) {
+  const p = d.property, s = d.survey, g = d.geometry;
+  const thr = (d.thresholds || {}).gnss_accuracy_warn_m || 10;
+  const acc = s && s.location_accuracy_m;
+  const decidable = s && ['SUBMITTED', 'CORRECTION_REQUIRED', 'APPROVED', 'REJECTED']
+    .indexOf(s.survey_status) >= 0;
+  const missing = [];
+  if (!g.entrance) missing.push('entrance');
+  if (!g.frontage) missing.push('frontage');
+  if (!g.service_zone) missing.push('service zone');
+  if (!d.photos.length) missing.push('frontage photo');
+
+  WQ.$('#rv-title').textContent = p.property_id + (p.house_number ? ' · ' + p.house_number : '');
+  WQ.$('#rv-chips').innerHTML = WQ.chip(p.survey_status) + WQ.chip(p.verification_status);
+
+  WQ.$('#rv-body').innerHTML =
+    (missing.length
+      ? '<div class="warn-box">Incomplete: ' + missing.join(', ') +
+        ' missing. Approval is blocked until the surveyor completes it.</div>' : '') +
+
+    '<div class="ev">' +
+      '<div class="stack" style="gap:10px">' +
+        '<div id="revmap" class="map-shell"></div>' +
+        '<div class="legend">' +
+          '<span><i style="background:var(--good)"></i>Entrance</span>' +
+          '<span><i style="background:var(--accent)"></i>Frontage</span>' +
+          '<span><i style="background:var(--violet)"></i>Service zone</span>' +
+          '<span><i style="background:var(--warn)"></i>Raw GNSS fix</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="stack" style="gap:8px">' +
+        (d.photos.length
+          ? '<div class="photo-frame" id="mainphoto" style="cursor:zoom-in">' +
+            '<img alt="frontage" src="/survey/api/photos/' +
+            encodeURIComponent(d.photos[0].photo_id) + '/file"' +
+            ' onerror="this.parentNode.classList.add(&quot;empty&quot;);this.remove()"></div>' +
+            '<div class="small muted">Frontage photo — click to enlarge</div>'
+          : WQ.emptyState('No frontage photo', 'The surveyor submitted no evidence.')) +
+      '</div>' +
+    '</div>' +
+
+    '<div class="ev" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr))">' +
+      '<div><div class="section-title">Property</div><dl class="kv">' +
+        '<dt>Address</dt><dd class="small">' + WQ.esc(p.formatted_address || '—') + '</dd>' +
+        '<dt>Owner</dt><dd class="small">' + WQ.esc(p.owner_name || '—') + '</dd>' +
+        '<dt>Ward / route</dt><dd class="small">' + WQ.esc(p.ward_name || '—') + ' · ' +
+          WQ.esc(p.route_id || '—') + '</dd>' +
+      '</dl></div>' +
+      '<div><div class="section-title">Survey</div><dl class="kv">' +
+        '<dt>Surveyor</dt><dd class="small">' + WQ.esc(p.surveyor_name || '—') + '</dd>' +
+        '<dt>Submitted</dt><dd class="small">' +
+          (s && s.submitted_at ? WQ.dateOf(s.submitted_at) : '—') + '</dd>' +
+        '<dt>Confidence</dt><dd>' +
+          (s && s.mapping_confidence ? WQ.chip(s.mapping_confidence) : '—') + '</dd>' +
+        '<dt>GPS accuracy</dt><dd class="mono ' +
+          (acc == null ? '' : acc > thr ? 'acc-bad' : acc > thr / 2 ? 'acc-warn' : 'acc-ok') +
+          '">' + (acc == null ? '—' : '±' + acc + ' m') + '</dd>' +
+        '<dt>Fix adjusted</dt><dd class="small">' +
+          (s && s.manually_adjusted ? 'moved on the map' : 'as captured') + '</dd>' +
+      '</dl></div>' +
+      '<div><div class="section-title">Geometry</div><dl class="kv">' +
+        '<dt>Entrance</dt><dd class="small">' +
+          (g.entrance ? 'mapped' : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Frontage</dt><dd class="small">' +
+          (g.frontage ? (g.frontage.length_m || '?') + ' m · ' +
+            (g.frontage.n_points || '?') + ' points' : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Service zone</dt><dd class="small">' +
+          (g.service_zone ? (g.service_zone.area_m2 || '?') + ' m² · ' +
+            (g.service_zone.n_points || '?') + ' vertices' : '<span class="muted">missing</span>') + '</dd>' +
+      '</dl></div>' +
+    '</div>' +
+
+    '<div><div class="section-title" style="margin-bottom:8px">Surveyor notes</div>' +
+      '<div class="note-box small">' +
+        WQ.esc((s && s.notes) || 'No notes.') +
+        (s && s.anomaly_type && s.anomaly_type.length
+          ? '<div style="margin-top:6px"><b>Anomalies:</b> ' +
+            s.anomaly_type.map(a => WQ.esc(a.replace(/_/g, ' ').toLowerCase())).join(', ') + '</div>'
+          : '') +
+      '</div></div>' +
+
+    (d.qa_issues.filter(q => q.status === 'OPEN').length
+      ? '<div><div class="section-title">Flagged for you</div>' +
+        d.qa_issues.filter(q => q.status === 'OPEN').map(q =>
+          '<div class="row" style="gap:8px;margin-top:6px">' + WQ.sevChip(q.severity) +
+          '<span class="small">' + WQ.esc(q.description || q.issue_type) + '</span></div>').join('') +
+        '</div>' : '') +
+
+    (decidable
+      ? '<div><div class="section-title" style="margin-bottom:8px">Decision</div>' +
+        '<label class="field"><span>Notes to the surveyor (required when returning)</span>' +
+          '<textarea id="rv-notes" rows="2" placeholder="What needs fixing…"></textarea></label>' +
+        '<div class="row wrap" style="margin-top:10px;gap:8px">' +
+          '<button class="primary" id="rv-approve"' + (missing.length ? ' disabled' : '') +
+            '>Approve</button>' +
+          '<button class="warn" id="rv-correct">Return for correction</button>' +
+          '<div class="spacer" style="flex:1"></div>' +
+          '<a class="btn" href="/survey/field' + WQ.qs({ property: p.property_id }) +
+            '">Open in field survey</a>' +
+        '</div>' +
+        '<div class="small muted" style="margin-top:8px">Approving is what sets ' +
+          '<code>VERIFIED_FOR_OPERATION</code> and marks the geometry verified. Nothing ' +
+          'else clears a property for collection.</div></div>'
+      : '<div class="note-box">This survey is <b>' +
+        WQ.esc(s ? WQ.state(s.survey_status).label : 'not started') +
+        '</b> and is not in the review queue.</div>');
+
+  const el = WQ.$('#revmap');
+  if (el) {
+    map = WQMap.create(el, { center: [p.latitude || 12.2958, p.longitude || 76.6394], zoom: 19 });
+    const layers = geomLayers(g, s);
+    map.setLayers(layers);
+    map.setTooltip(f => WQ.esc(f.properties.t || ''));
+    const feats = layers.map(l => l.data).filter(Boolean);
+    if (feats.length) map.fitTo({ type: 'FeatureCollection', features: feats }, 60);
+  }
+  if (WQ.$('#mainphoto'))
+    WQ.$('#mainphoto').addEventListener('click', () => showPhoto(d.photos[0]));
+  if (decidable) {
+    if (WQ.$('#rv-approve')) WQ.$('#rv-approve').addEventListener('click', () => decide('APPROVE'));
+    WQ.$('#rv-correct').addEventListener('click', () => decide('CORRECTION_REQUIRED'));
+  }
+}
+
+function showPhoto(ph) {
+  if (!ph) return;
+  WQ.$('#pm-title').textContent = ph.photo_type + ' · ' + ph.photo_id;
+  WQ.$('#pm-body').innerHTML =
+    '<div class="photo-frame" style="max-height:70vh"><img alt="frontage" src="' +
+    '/survey/api/photos/' + encodeURIComponent(ph.photo_id) + '/file"></div>' +
+    '<dl class="kv" style="margin-top:12px">' +
+      '<dt>Captured</dt><dd>' + (ph.captured_at ? WQ.dateOf(ph.captured_at) : '—') + '</dd>' +
+      '<dt>Source</dt><dd class="small">' + WQ.esc(ph.capture_method || '—') + '</dd>' +
+      '<dt>SHA-256</dt><dd class="mono small">' +
+        WQ.esc((ph.sha256 || '—').slice(0, 32)) + '…</dd>' +
+    '</dl>';
+  PM.open();
+}
+
+async function decide(action) {
+  if (!CUR || !CUR.survey) return;
+  const notes = (WQ.$('#rv-notes').value || '').trim();
+  if (action !== 'APPROVE' && !notes) {
+    WQ.toast('Say what needs fixing before returning it.', 'warn');
+    WQ.$('#rv-notes').focus();
+    return;
+  }
+  const label = action === 'APPROVE' ? 'Approve' : 'Return for correction';
+  const ok = await WQ.confirmDialog(
+    label + ' ' + CUR.property.property_id + '? ' + (action === 'APPROVE'
+      ? 'This clears the property for operational use.'
+      : 'The surveyor will see your notes.'),
+    label, action === 'APPROVE' ? 'primary' : 'warn');
+  if (!ok) return;
+  try {
+    await WQ.api('/survey/api/surveys/' + encodeURIComponent(CUR.survey.survey_id) + '/review', {
+      method: 'POST',
+      body: { action: action, reviewer_id: meId(), review_notes: notes || null }
+    });
+    WQ.toast(label + 'd · ' + CUR.property.property_id,
+             action === 'APPROVE' ? 'good' : 'warn');
+    const pid = CUR.property.property_id;
+    CUR = null;
+    await loadQueue(true);
+    await open(pid);
+  } catch (e) { WQ.toast(e.message, 'crit', 8000); }
+}
+
+async function boot() {
+  try {
+    const users = await WQ.api('/survey/api/users');
+    const rev = users.filter(u =>
+      ['REVIEWER', 'GIS_ADMIN', 'SUPERVISOR', 'ADMIN'].indexOf(u.role) >= 0);
+    WQ.$('#me').innerHTML = rev.map(u => '<option value="' + WQ.esc(u.user_id) + '">' +
+      WQ.esc(u.name) + ' · ' + WQ.esc(u.role.toLowerCase()) + '</option>').join('');
+    const saved = WQ.store.get('wq-reviewer', '');
+    if (saved && rev.some(u => u.user_id === saved)) WQ.$('#me').value = saved;
+    WQ.$('#me').addEventListener('change', () => WQ.store.set('wq-reviewer', meId()));
+  } catch (e) { WQ.toast('Users: ' + e.message, 'crit'); }
+
+  WQ.$('#f_status').addEventListener('change', () => { CUR = null; loadQueue(); });
+  WQ.$('#reload').addEventListener('click', () => loadQueue(true));
+
+  const prop = WQ.param('property');
+  await loadQueue(!!prop);
+  if (prop) open(prop);
+}
+boot();
+</script>
+</body>
+</html>

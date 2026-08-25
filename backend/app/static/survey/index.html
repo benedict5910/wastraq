@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wastraq — City survey overview</title>
+<link rel="stylesheet" href="/assets/wq.css">
+<style>
+  .two { display: grid; grid-template-columns: minmax(0,1fr) minmax(320px,420px);
+         gap: 14px; align-items: start; }
+  @media (max-width: 1080px) { .two { grid-template-columns: 1fr; } }
+  #ovmap { height: 420px; }
+
+  /* Scale path: Pilot Lane -> Route -> Ward -> Zone -> City */
+  .scale { display: flex; flex-direction: column; gap: 0; }
+  .scale-step { display: grid; grid-template-columns: 26px 1fr auto; gap: 12px;
+                align-items: center; padding: 10px 0; }
+  .scale-rail { position: relative; width: 26px; align-self: stretch;
+                display: flex; justify-content: center; }
+  .scale-rail::before { content: ''; position: absolute; top: -10px; bottom: -10px;
+                width: 2px; background: var(--line-2); }
+  .scale-step:first-child .scale-rail::before { top: 50%; }
+  .scale-step:last-child .scale-rail::before { bottom: 50%; }
+  .scale-dot { position: relative; width: 12px; height: 12px; border-radius: 50%;
+               background: var(--surface-3); border: 2px solid var(--line-2); align-self: center; }
+  .scale-step.live .scale-dot { background: var(--good); border-color: var(--good); }
+  .scale-step.ready .scale-dot { background: var(--surface-1); border-color: var(--accent); }
+  .scale-name { font-weight: 620; font-size: 13.5px; }
+  .scale-sub { font-size: 12px; color: var(--ink-3); }
+  .pill-ready { font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
+                padding: 3px 8px; border-radius: 999px;
+                background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+  .pill-live { font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
+               padding: 3px 8px; border-radius: 999px;
+               background: var(--good-soft); color: var(--good); white-space: nowrap; }
+</style>
+</head>
+<body>
+<script src="/assets/wq.js"></script>
+<script src="/assets/wq-map.js"></script>
+
+<div class="drawer-scrim" id="sp-scrim"></div>
+<aside class="drawer" id="sp">
+  <header>
+    <div class="stack" style="flex:1"><h3 id="sp-title">Property</h3>
+      <span class="small muted" id="sp-sub"></span></div>
+    <button class="icon ghost" onclick="SP.close()">✕</button>
+  </header>
+  <div class="body" id="sp-body"></div>
+  <footer>
+    <a class="btn primary" id="sp-field" href="#">Open in field survey</a>
+    <a class="btn" id="sp-review" href="#">Review</a>
+  </footer>
+</aside>
+
+<script>
+const main = WQ.shell({
+  title: 'City survey overview',
+  subtitle: 'Every figure below is real surveyed data',
+  suite: 'Survey', user: 'Supervisor'
+});
+
+main.innerHTML = `
+  <section class="card">
+    <header><h2>Filters</h2><div class="spacer"></div>
+      <span class="small muted" id="count">—</span>
+      <button class="sm" id="reset">Reset</button></header>
+    <div class="body">
+      <div class="filters">
+        <label class="field grow"><span>Search</span>
+          <input id="f_q" placeholder="Property ID, owner, house number, address…"></label>
+        <label class="field"><span>City / zone / ward / route area</span>
+          <select id="f_unit"></select></label>
+        <label class="field"><span>Route</span><select id="f_route"></select></label>
+        <label class="field"><span>Status</span><select id="f_status">
+          <option value="">All</option><option>APPROVED</option><option>SUBMITTED</option>
+          <option>CORRECTION_REQUIRED</option><option>IN_PROGRESS</option>
+          <option>NOT_SURVEYED</option><option>REJECTED</option></select></label>
+      </div>
+    </div>
+  </section>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="two">
+    <section class="card">
+      <header><h2>Surveyed properties</h2><div class="spacer"></div>
+        <button class="sm" id="fitBtn">Fit</button>
+        <button class="sm" id="bmBtn">Basemap</button></header>
+      <div id="ovmap"></div>
+      <div class="body" style="padding:10px 16px">
+        <div class="legend" id="legend"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <header><h2>Scale path</h2><div class="spacer"></div>
+        <span class="small muted">schema &amp; UI, live status</span></header>
+      <div class="body">
+        <div class="scale" id="scale"></div>
+        <div class="note-box small" id="scaleNote"></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card">
+    <header><h2>Properties</h2><div class="spacer"></div>
+      <span class="small muted" id="tblCount"></span></header>
+    <div class="body flush tbl-wrap" style="max-height:460px">
+      <table class="tbl">
+        <thead><tr><th>Property</th><th>Address</th><th>Route</th><th>Ward</th>
+          <th>Survey</th><th>Confidence</th><th>Mapped</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>Also available</h2><div class="spacer"></div>
+      <span class="small muted">supporting tools, not part of the daily flow</span></header>
+    <div class="body">
+      <div class="row wrap" style="gap:8px">
+        <a class="btn" href="/survey/field">Field survey</a>
+        <a class="btn" href="/survey/review">Review queue</a>
+        <a class="btn" href="/survey/map">Full-screen map</a>
+        <a class="btn" href="/survey/assignments">Survey assignments</a>
+        <a class="btn" href="/survey/qa">GIS QA checks</a>
+        <a class="btn" href="/dashboard">Live lane operations</a>
+      </div>
+      <div class="small muted" style="margin-top:8px">Assignments and GIS QA are fully
+        implemented and database-backed. They sit here rather than in the main flow because
+        a 16-property pilot does not need them yet — a city rollout does.</div>
+    </div>
+  </section>
+`;
+
+const SP = WQ.drawer('sp');
+let map = null, FC = null, ROWS = [], SCALE = null;
+
+function filters() {
+  return {
+    q: WQ.$('#f_q').value.trim() || null,
+    admin_unit_id: WQ.$('#f_unit').value || null,
+    route_id: WQ.$('#f_route').value || null,
+    status: WQ.$('#f_status').value || null,
+    limit: 2000
+  };
+}
+
+// ---------------------------------------------------------------- scale ---
+const LEVEL_LABEL = {
+  PILOT: ['Pilot Lane', 'the surveyed lane this system runs on today'],
+  ROUTE_AREA: ['Route', 'a collection round within a ward'],
+  WARD: ['Ward', 'the smallest administrative unit an authority uses'],
+  ZONE: ['Zone', 'a group of wards'],
+  CITY: ['City', 'the whole authority']
+};
+
+function renderScale(sc) {
+  const byType = {};
+  (sc.levels || []).forEach(l => { byType[l.unit_type] = l; });
+
+  const pilotRoute = (sc.routes || []).find(r => r.route_id === sc.pilot_route_id);
+  const steps = [
+    { key: 'PILOT', units: pilotRoute ? 1 : 0,
+      props: pilotRoute ? Number(pilotRoute.properties) : 0,
+      verified: pilotRoute ? Number(pilotRoute.verified) : 0,
+      unitWord: 'lane' },
+    { key: 'ROUTE_AREA', unitWord: 'route area' },
+    { key: 'WARD', unitWord: 'ward' },
+    { key: 'ZONE', unitWord: 'zone' },
+    { key: 'CITY', unitWord: 'city' }
+  ].map(s => {
+    if (s.key === 'PILOT') return s;
+    const l = byType[s.key] || {};
+    return Object.assign(s, {
+      units: Number(l.units || 0),
+      props: Number(l.properties || 0),
+      verified: Number(l.verified || 0)
+    });
+  });
+
+  WQ.$('#scale').innerHTML = steps.map(s => {
+    const live = s.props > 0;
+    const configured = s.units > 0;
+    const [name, blurb] = LEVEL_LABEL[s.key];
+    return '<div class="scale-step ' + (live ? 'live' : configured ? 'ready' : '') + '">' +
+      '<div class="scale-rail"><span class="scale-dot"></span></div>' +
+      '<div><div class="scale-name">' + WQ.esc(name) + '</div>' +
+        '<div class="scale-sub">' +
+        (live
+          ? WQ.num(s.props) + ' propert' + (s.props === 1 ? 'y' : 'ies') + ' · ' +
+            WQ.num(s.verified) + ' verified'
+          : configured
+            ? WQ.num(s.units) + ' ' + s.unitWord + (s.units === 1 ? '' : 's') +
+              ' configured · no properties loaded yet'
+            : WQ.esc(blurb)) +
+        '</div></div>' +
+      '<div>' + (live ? '<span class="pill-live">live data</span>'
+                : configured ? '<span class="pill-ready">ready</span>'
+                : '<span class="chip neutral">not configured</span>') + '</div>' +
+    '</div>';
+  }).join('');
+
+  const liveLevels = steps.filter(s => s.props > 0).length;
+  WQ.$('#scaleNote').innerHTML =
+    '<b>16-property pilot today → the same schema and UI support ward → zone → whole city.</b> ' +
+    'Nothing below the top level is a mock-up: ' + liveLevels + ' of ' + steps.length +
+    ' levels currently hold real surveyed properties, and the rest are already modelled — ' +
+    'loading a second route or a whole ward adds rows, not code.' +
+    (sc.properties_without_admin_unit
+      ? ' <span class="acc-warn">' + sc.properties_without_admin_unit +
+        ' propert(ies) are not yet attached to an administrative unit.</span>' : '');
+}
+
+// ----------------------------------------------------------------- map ----
+async function loadMap(fit) {
+  FC = await WQ.api('/survey/api/properties/geojson' + WQ.qs(filters()));
+  map.setLayers([{
+    id: 'props', type: 'point', data: FC, pickable: true,
+    style: (f) => ({ fill: WQ.stateColour(f.properties.survey_status),
+                     stroke: 'rgba(0,0,0,0.55)', radius: 6 })
+  }]);
+  if (fit && FC.features.length) map.fitTo(FC, 60);
+  const keys = ['APPROVED', 'SUBMITTED', 'CORRECTION_REQUIRED', 'IN_PROGRESS', 'NOT_SURVEYED'];
+  WQ.$('#legend').innerHTML = keys.map(k =>
+    '<span><i style="background:' + WQ.stateColour(k) + '"></i>' +
+    WQ.esc(WQ.state(k).label) + '</span>').join('') +
+    (FC.features.length ? '' :
+      '<span class="muted">no properties match these filters</span>');
+}
+
+// --------------------------------------------------------------- drawer ---
+async function openProp(pid) {
+  SP.open();
+  WQ.$('#sp-title').textContent = pid;
+  WQ.$('#sp-sub').textContent = 'loading…';
+  WQ.$('#sp-body').innerHTML = '<div class="skel" style="height:170px"></div>';
+  WQ.$('#sp-field').href = '/survey/field' + WQ.qs({ property: pid });
+  WQ.$('#sp-review').href = '/survey/review' + WQ.qs({ property: pid });
+  try {
+    const d = await WQ.api('/survey/api/properties/' + encodeURIComponent(pid) + '/survey');
+    const p = d.property, s = d.survey, g = d.geometry;
+    WQ.$('#sp-sub').textContent = [p.ward_name, p.zone_name, p.route_id].filter(Boolean).join(' · ');
+    WQ.$('#sp-body').innerHTML =
+      '<div class="row wrap" style="gap:6px">' + WQ.chip(p.survey_status) +
+        WQ.chip(p.verification_status) + '</div>' +
+      (d.photos.length
+        ? '<div class="photo-frame"><img alt="frontage" src="/survey/api/photos/' +
+          encodeURIComponent(d.photos[0].photo_id) + '/file"></div>' : '') +
+      '<div><div class="section-title">Property</div><dl class="kv">' +
+        '<dt>Owner</dt><dd>' + WQ.esc(p.owner_name || '—') + '</dd>' +
+        '<dt>House no.</dt><dd>' + WQ.esc(p.house_number || '—') + '</dd>' +
+        '<dt>Address</dt><dd>' + WQ.esc(p.formatted_address || '—') + '</dd>' +
+        '<dt>Route</dt><dd class="mono">' + WQ.esc(p.route_id || '—') + '</dd>' +
+      '</dl></div>' +
+      '<div><div class="section-title">Survey</div><dl class="kv">' +
+        '<dt>Surveyor</dt><dd>' + WQ.esc(p.surveyor_name || '—') + '</dd>' +
+        '<dt>Confidence</dt><dd>' +
+          (p.survey_mapping_confidence ? WQ.chip(p.survey_mapping_confidence) : '—') + '</dd>' +
+        '<dt>GPS accuracy</dt><dd class="mono">' +
+          (s && s.location_accuracy_m != null ? '±' + s.location_accuracy_m + ' m' : '—') + '</dd>' +
+        '<dt>Reviewed</dt><dd>' + (p.reviewed_at ? WQ.dateOf(p.reviewed_at) : '—') + '</dd>' +
+      '</dl></div>' +
+      '<div><div class="section-title">Geometry</div><dl class="kv">' +
+        '<dt>Entrance</dt><dd>' + (g.entrance ? 'mapped' : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Frontage</dt><dd>' + (g.frontage ? (g.frontage.length_m || '?') + ' m'
+          : '<span class="muted">missing</span>') + '</dd>' +
+        '<dt>Service zone</dt><dd>' + (g.service_zone ? (g.service_zone.area_m2 || '?') + ' m²'
+          : '<span class="muted">missing</span>') + '</dd>' +
+      '</dl></div>';
+  } catch (e) {
+    WQ.$('#sp-body').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+// ---------------------------------------------------------------- table ---
+function renderTable() {
+  WQ.$('#tblCount').textContent = ROWS.length + ' shown';
+  WQ.$('#rows').innerHTML = ROWS.length ? ROWS.map(r =>
+    '<tr class="clickable" data-id="' + WQ.esc(r.property_id) + '">' +
+      '<td class="mono small nowrap">' + WQ.esc(r.property_id) +
+        '<div class="small muted">' + WQ.esc(r.house_number || '') + '</div></td>' +
+      '<td class="small">' + WQ.esc(r.formatted_address || '—') + '</td>' +
+      '<td class="mono small nowrap">' + WQ.esc(r.route_id || '—') + '</td>' +
+      '<td class="small nowrap">' + WQ.esc(r.ward_name || '—') + '</td>' +
+      '<td>' + WQ.chip(r.survey_status) + '</td>' +
+      '<td>' + (r.survey_mapping_confidence ? WQ.chip(r.survey_mapping_confidence) : '—') + '</td>' +
+      '<td class="small nowrap">' +
+        (r.has_entrance ? '<span class="acc-ok">E</span> ' : '<span class="muted">E</span> ') +
+        (r.has_frontage ? '<span class="acc-ok">F</span> ' : '<span class="muted">F</span> ') +
+        (r.has_service_zone ? '<span class="acc-ok">Z</span>' : '<span class="muted">Z</span>') +
+      '</td>' +
+      '<td><a class="small" href="/survey/field' + WQ.qs({ property: r.property_id }) +
+        '">survey →</a></td>' +
+    '</tr>').join('')
+    : '<tr><td colspan="8">' + WQ.emptyState('No properties match',
+        'Clear the filters, or survey a property in the field interface.') + '</td></tr>';
+  WQ.$$('#rows tr.clickable').forEach(tr =>
+    tr.addEventListener('click', (e) => {
+      if (e.target.tagName !== 'A') openProp(tr.dataset.id);
+    }));
+}
+
+// ----------------------------------------------------------------- load ---
+async function load(fit) {
+  try {
+    const [a, list] = await Promise.all([
+      WQ.api('/survey/api/analytics/overview' + WQ.qs({ admin_unit_id: WQ.$('#f_unit').value || null })),
+      WQ.api('/survey/api/properties' + WQ.qs(filters()))
+    ]);
+    const t = a.totals;
+    ROWS = list.items || [];
+    WQ.$('#count').textContent = WQ.num(t.total_properties) + ' properties in scope';
+
+    WQ.$('#kpis').innerHTML = [
+      WQ.kpi({ label: 'Properties', value: WQ.num(t.total_properties),
+               sub: 'real, surveyed on the ground' }),
+      WQ.kpi({ label: 'Surveyed', value: WQ.num(t.surveyed), tone: 'violet',
+               sub: WQ.pct(t.surveyed_pct) + ' of scope', bar: t.surveyed_pct }),
+      WQ.kpi({ label: 'Verified', value: WQ.num(t.verified), tone: 'good',
+               sub: 'approved and cleared for operation', bar: t.verified_pct }),
+      WQ.kpi({ label: 'Pending review', value: WQ.num(t.pending_review), tone: 'warn',
+               sub: t.pending_review ? 'waiting for a reviewer' : 'nothing waiting' }),
+      WQ.kpi({ label: 'Correction required', value: WQ.num(t.correction_required),
+               tone: t.correction_required ? 'crit' : 'neutral',
+               sub: t.correction_required ? 'returned to the surveyor' : 'none returned' })
+    ].join('');
+
+    renderTable();
+    await loadMap(fit);
+  } catch (e) {
+    WQ.$('#kpis').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+async function boot() {
+  map = WQMap.create(WQ.$('#ovmap'), { center: [12.29433, 76.64148], zoom: 17 });
+  map.setTooltip(f => '<b>' + WQ.esc(f.properties.property_id) + '</b> · ' +
+    WQ.esc(WQ.state(f.properties.survey_status).label));
+  map.on('click', (f) => { if (f) openProp(f.properties.property_id); });
+
+  try {
+    const [tree, routes, sc] = await Promise.all([
+      WQ.api('/survey/api/admin-units/tree'),
+      WQ.api('/routes'),
+      WQ.api('/survey/api/analytics/scale')
+    ]);
+    SCALE = sc;
+    WQ.$('#f_unit').innerHTML = '<option value="">Whole authority</option>' +
+      tree.map(t => '<option value="' + WQ.esc(t.admin_unit_id) + '">' +
+        WQ.esc(t.full_path) + '</option>').join('');
+    WQ.$('#f_route').innerHTML = '<option value="">All routes</option>' +
+      routes.map(r => '<option value="' + WQ.esc(r.route_id) + '">' +
+        WQ.esc(r.route_id) + '</option>').join('');
+    renderScale(sc);
+  } catch (e) { WQ.toast('Reference data: ' + e.message, 'crit'); }
+
+  let t = null;
+  ['#f_q', '#f_unit', '#f_route', '#f_status'].forEach(sel =>
+    WQ.$(sel).addEventListener('input', () => {
+      clearTimeout(t); t = setTimeout(() => load(true), 260);
+    }));
+  WQ.$('#reset').addEventListener('click', () => {
+    ['#f_q', '#f_unit', '#f_route', '#f_status'].forEach(s => WQ.$(s).value = '');
+    load(true);
+  });
+  WQ.$('#fitBtn').addEventListener('click', () => { if (FC) map.fitTo(FC, 60); });
+  let bm = true;
+  WQ.$('#bmBtn').addEventListener('click', () => { bm = !bm; map.setBasemap(bm); });
+
+  await load(true);
+}
+boot();
+document.addEventListener('wq:theme', () => { if (SCALE) renderScale(SCALE); renderTable(); });
+</script>
+</body>
+</html>

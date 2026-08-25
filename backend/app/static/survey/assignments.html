@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wastraq — Survey assignments</title>
+<link rel="stylesheet" href="/assets/wq.css">
+<style>
+  .stack-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-3); }
+  .stack-bar i { display: block; height: 100%; transition: width .5s var(--ease); }
+</style>
+</head>
+<body>
+<script src="/assets/wq.js"></script>
+
+<!-- create-assignment modal -->
+<div class="modal-scrim" id="newm">
+  <div class="modal" style="max-width:620px">
+    <header><h3>Create survey assignment</h3><div class="spacer"></div>
+      <button class="icon ghost" onclick="NEWM.close()">✕</button></header>
+    <div class="body">
+      <div class="note-box small">
+        An assignment hands one administrative area to one surveyor. Creating it with
+        <b>seed property rows</b> writes a <code>NOT_SURVEYED</code> survey row for every
+        property in that area so progress can be tracked from day one. Existing surveys are
+        never overwritten.
+      </div>
+      <div class="filters" style="margin-top:12px">
+        <label class="field grow"><span>Administrative area *</span>
+          <select id="n_unit"></select></label>
+        <label class="field"><span>Route (optional)</span>
+          <input id="n_route" placeholder="ROUTE-…"></label>
+      </div>
+      <div class="filters">
+        <label class="field grow"><span>Surveyor *</span><select id="n_to"></select></label>
+        <label class="field"><span>Assigned by</span><select id="n_by"></select></label>
+        <label class="field"><span>Due date</span><input id="n_due" type="date"></label>
+      </div>
+      <label class="row" style="gap:8px;margin-top:10px;cursor:pointer">
+        <input type="checkbox" id="n_seed" checked>
+        <span class="small">Seed a survey row for every property in the area</span>
+      </label>
+      <div id="n_err"></div>
+    </div>
+    <footer>
+      <button onclick="NEWM.close()">Cancel</button>
+      <button class="primary" id="n_go">Create assignment</button>
+    </footer>
+  </div>
+</div>
+
+<!-- assignment detail drawer -->
+<div class="drawer-scrim" id="ad-scrim"></div>
+<aside class="drawer wide" id="ad">
+  <header>
+    <div class="stack" style="flex:1"><h3 id="ad-title">Assignment</h3>
+      <span class="small muted" id="ad-sub"></span></div>
+    <button class="icon ghost" onclick="AD.close()">✕</button>
+  </header>
+  <div class="body" id="ad-body"></div>
+  <footer>
+    <a class="btn" id="ad-map" href="/survey/map">View on map</a>
+    <button onclick="AD.close()">Close</button>
+  </footer>
+</aside>
+
+<script>
+const main = WQ.shell({
+  title: 'Survey assignments',
+  subtitle: 'Who is surveying which part of the city, and how far along they are',
+  suite: 'Survey', user: 'Supervisor'
+});
+
+main.innerHTML = `
+  <div class="row wrap">
+    <label class="field"><span>Status</span><select id="f_status">
+      <option value="">All</option><option>NOT_STARTED</option><option>IN_PROGRESS</option>
+      <option>SUBMITTED</option><option>COMPLETED</option><option>ON_HOLD</option></select></label>
+    <label class="field"><span>Surveyor</span><select id="f_to"><option value="">All</option></select></label>
+    <label class="field grow"><span>Search</span>
+      <input id="f_q" placeholder="Assignment ID, area, route…"></label>
+    <div class="spacer" style="flex:1"></div>
+    <button id="reset">Reset</button>
+    <button class="primary" id="newBtn">New assignment</button>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <section class="card">
+    <header><h2>Assignments</h2><div class="spacer"></div>
+      <span class="small muted" id="count">—</span></header>
+    <div class="body flush tbl-wrap">
+      <table class="tbl">
+        <thead><tr>
+          <th>Assignment</th><th>Area</th><th>Route</th><th>Surveyor</th>
+          <th style="width:22%">Progress</th>
+          <th class="num">Total</th><th class="num">Verified</th>
+          <th class="num">Pending</th><th class="num">Outstanding</th>
+          <th>Due</th><th>Status</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+`;
+
+const NEWM = WQ.modal('newm');
+const AD   = WQ.drawer('ad');
+let ROWS = [], UNITS = [], USERS = [];
+
+function bar(r) {
+  const total = Math.max(1, Number(r.total_properties || 0));
+  const seg = [['APPROVED', r.verified_count], ['SUBMITTED', r.pending_review_count],
+               ['CORRECTION_REQUIRED', r.correction_count], ['NOT_SURVEYED', r.outstanding_count]];
+  return '<div class="stack-bar" data-tip="' +
+    seg.filter(s => s[1]).map(s => WQ.state(s[0]).label + ' ' + s[1]).join(' · ') + '">' +
+    seg.map(s => s[1] ? '<i style="width:' + (100 * s[1] / total) + '%;background:' +
+      WQ.stateColour(s[0]) + '"></i>' : '').join('') + '</div>';
+}
+
+function dueCell(r) {
+  if (!r.due_date) return '<span class="muted">—</span>';
+  const days = Math.round((new Date(r.due_date + 'T00:00:00') - Date.now()) / 86400000);
+  const late = days < 0 && r.status !== 'COMPLETED';
+  const soon = days >= 0 && days <= 7 && r.status !== 'COMPLETED';
+  return '<span class="' + (late ? 'acc-bad' : soon ? 'acc-warn' : '') + '">' +
+    WQ.esc(r.due_date) + '</span>' +
+    (late ? '<div class="small acc-bad">' + Math.abs(days) + 'd overdue</div>' :
+     soon ? '<div class="small muted">in ' + days + 'd</div>' : '');
+}
+
+function render() {
+  const q = WQ.$('#f_q').value.trim().toLowerCase();
+  const list = ROWS.filter(r => !q ||
+    [r.assignment_id, r.admin_unit_name, r.route_id, r.assigned_to_name]
+      .some(v => (v || '').toLowerCase().indexOf(q) >= 0));
+
+  WQ.$('#count').textContent = list.length + ' of ' + ROWS.length + ' assignments';
+  WQ.$('#rows').innerHTML = list.length ? list.map(r =>
+    '<tr class="clickable" data-id="' + WQ.esc(r.assignment_id) + '">' +
+      '<td class="mono">' + WQ.esc(r.assignment_id) + '</td>' +
+      '<td>' + WQ.esc(r.admin_unit_name || r.admin_unit_id) +
+        '<div class="small muted">' + WQ.esc(r.admin_unit_type || '') + '</div></td>' +
+      '<td class="mono small nowrap">' + WQ.esc(r.route_id || '—') + '</td>' +
+      '<td class="nowrap">' + WQ.esc(r.assigned_to_name || 'unassigned') + '</td>' +
+      '<td>' + bar(r) + '</td>' +
+      '<td class="num">' + WQ.num(r.total_properties) + '</td>' +
+      '<td class="num">' + WQ.num(r.verified_count) + '</td>' +
+      '<td class="num">' + WQ.num(r.pending_review_count) + '</td>' +
+      '<td class="num">' + WQ.num(r.outstanding_count) + '</td>' +
+      '<td class="small">' + dueCell(r) + '</td>' +
+      '<td>' + WQ.chip(r.status) + '</td>' +
+    '</tr>').join('')
+    : '<tr><td colspan="11">' + WQ.emptyState('No assignments match these filters',
+        'Clear the filters, or create a new assignment.') + '</td></tr>';
+
+  WQ.$$('#rows tr.clickable').forEach(tr =>
+    tr.addEventListener('click', () => openAssignment(tr.dataset.id)));
+
+  const sum = (k) => ROWS.reduce((a, r) => a + Number(r[k] || 0), 0);
+  const total = sum('total_properties'), ver = sum('verified_count');
+  WQ.$('#kpis').innerHTML = [
+    WQ.kpi({ label: 'Assignments', value: WQ.num(ROWS.length),
+             sub: ROWS.filter(r => r.status === 'IN_PROGRESS').length + ' in progress' }),
+    WQ.kpi({ label: 'Properties assigned', value: WQ.num(total), tone: 'violet',
+             sub: 'across every open assignment' }),
+    WQ.kpi({ label: 'Verified', value: WQ.num(ver), tone: 'good',
+             sub: WQ.pct(total ? 100 * ver / total : 0) + ' of assigned',
+             bar: total ? 100 * ver / total : 0 }),
+    WQ.kpi({ label: 'Awaiting review', value: WQ.num(sum('pending_review_count')), tone: 'warn',
+             sub: sum('correction_count') + ' need correction' }),
+  ].join('');
+}
+
+async function openAssignment(id) {
+  AD.open();
+  WQ.$('#ad-title').textContent = id;
+  WQ.$('#ad-sub').textContent = 'loading…';
+  WQ.$('#ad-body').innerHTML = '<div class="skel" style="height:180px"></div>';
+  try {
+    const a = await WQ.api('/survey/api/assignments/' + encodeURIComponent(id));
+    WQ.$('#ad-sub').textContent = [a.admin_unit_name, a.route_id, a.assigned_to_name]
+      .filter(Boolean).join(' · ');
+    WQ.$('#ad-map').href = '/survey/map' + WQ.qs({ unit: a.admin_unit_id });
+    const props = a.properties || [];
+    WQ.$('#ad-body').innerHTML =
+      '<div class="row wrap" style="gap:6px">' + WQ.chip(a.status) +
+        (a.due_date ? '<span class="chip neutral">due ' + WQ.esc(a.due_date) + '</span>' : '') +
+        '</div>' +
+      '<div>' + bar(a) + '</div>' +
+      '<div><div class="section-title">Assignment</div><dl class="kv">' +
+        '<dt>Area</dt><dd>' + WQ.esc(a.admin_unit_name || '—') +
+          ' <span class="small muted">' + WQ.esc(a.admin_unit_type || '') + '</span></dd>' +
+        '<dt>Route</dt><dd class="mono">' + WQ.esc(a.route_id || '—') + '</dd>' +
+        '<dt>Surveyor</dt><dd>' + WQ.esc(a.assigned_to_name || '—') + '</dd>' +
+        '<dt>Created</dt><dd>' + WQ.dateOf(a.created_at) + '</dd>' +
+        '<dt>Completed</dt><dd>' + (a.completed_at ? WQ.dateOf(a.completed_at) : '—') + '</dd>' +
+      '</dl></div>' +
+      '<div><div class="section-title">Progress</div><dl class="kv">' +
+        '<dt>Total properties</dt><dd>' + WQ.num(a.total_properties) + '</dd>' +
+        '<dt>Surveyed</dt><dd>' + WQ.num(a.surveyed_count) + '</dd>' +
+        '<dt>Verified</dt><dd>' + WQ.num(a.verified_count) + '</dd>' +
+        '<dt>Pending review</dt><dd>' + WQ.num(a.pending_review_count) + '</dd>' +
+        '<dt>Correction</dt><dd>' + WQ.num(a.correction_count) + '</dd>' +
+        '<dt>Outstanding</dt><dd>' + WQ.num(a.outstanding_count) + '</dd>' +
+      '</dl></div>' +
+      '<div><div class="section-title">Properties (' + props.length + ')</div>' +
+        (props.length
+          ? '<div class="tbl-wrap" style="max-height:340px"><table class="tbl compact">' +
+            '<thead><tr><th>Property</th><th>House</th><th>Status</th>' +
+            '<th class="num">QA</th><th></th></tr></thead><tbody>' +
+            props.slice(0, 400).map(p =>
+              '<tr><td class="mono small">' + WQ.esc(p.property_id) + '</td>' +
+              '<td class="small">' + WQ.esc(p.house_number || '—') + '</td>' +
+              '<td>' + WQ.chip(p.survey_status) + '</td>' +
+              '<td class="num">' + (p.open_qa_issues || 0) + '</td>' +
+              '<td><a class="small" href="/survey/field' +
+                WQ.qs({ property: p.property_id, assignment: id }) + '">survey →</a></td></tr>'
+            ).join('') + '</tbody></table></div>' +
+            (props.length > 400 ? '<div class="small muted" style="margin-top:6px">Showing the first 400.</div>' : '')
+          : WQ.emptyState('No properties linked yet',
+              'This assignment was created without seeding survey rows.')) +
+      '</div>';
+  } catch (e) {
+    WQ.$('#ad-body').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  }
+}
+
+async function load() {
+  WQ.$('#rows').innerHTML = WQ.skeletonRows(11, 6);
+  try {
+    ROWS = await WQ.api('/survey/api/assignments' + WQ.qs({
+      status: WQ.$('#f_status').value || null,
+      assigned_to: WQ.$('#f_to').value || null,
+      limit: 500
+    }));
+    render();
+  } catch (e) {
+    WQ.$('#rows').innerHTML = '<tr><td colspan="11"><div class="err-box">' +
+      WQ.esc(e.message) + '</div></td></tr>';
+  }
+}
+
+async function createAssignment() {
+  const body = {
+    admin_unit_id: WQ.$('#n_unit').value,
+    route_id: WQ.$('#n_route').value.trim() || null,
+    assigned_to: WQ.$('#n_to').value || null,
+    assigned_by: WQ.$('#n_by').value || null,
+    due_date: WQ.$('#n_due').value || null,
+    include_properties: WQ.$('#n_seed').checked
+  };
+  WQ.$('#n_err').innerHTML = '';
+  if (!body.admin_unit_id) { WQ.$('#n_err').innerHTML = '<div class="err-box">Pick an administrative area.</div>'; return; }
+  if (!body.assigned_to)   { WQ.$('#n_err').innerHTML = '<div class="err-box">Pick a surveyor.</div>'; return; }
+  const btn = WQ.$('#n_go'); btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    const r = await WQ.api('/survey/api/assignments', { method: 'POST', body: body });
+    NEWM.close();
+    WQ.toast('Created ' + r.assignment_id + ' · ' + WQ.num(r.total_properties) + ' properties', 'good');
+    await load();
+    openAssignment(r.assignment_id);
+  } catch (e) {
+    WQ.$('#n_err').innerHTML = '<div class="err-box">' + WQ.esc(e.message) + '</div>';
+  } finally { btn.disabled = false; btn.textContent = 'Create assignment'; }
+}
+
+async function boot() {
+  try {
+    const [tree, users] = await Promise.all([
+      WQ.api('/survey/api/admin-units/tree'),
+      WQ.api('/survey/api/users')
+    ]);
+    UNITS = tree; USERS = users;
+    const opts = tree.filter(t => t.depth > 1).map(t =>
+      '<option value="' + WQ.esc(t.admin_unit_id) + '">' + WQ.esc(t.full_path) + '</option>').join('');
+    WQ.$('#n_unit').innerHTML = '<option value="">Select an area…</option>' + opts;
+
+    const byRole = (r) => users.filter(u => u.role === r).map(u =>
+      '<option value="' + WQ.esc(u.user_id) + '">' + WQ.esc(u.name) + '</option>').join('');
+    WQ.$('#n_to').innerHTML = '<option value="">Select a surveyor…</option>' + byRole('SURVEYOR');
+    WQ.$('#n_by').innerHTML = '<option value="">—</option>' + byRole('SUPERVISOR') + byRole('ADMIN');
+    WQ.$('#f_to').innerHTML = '<option value="">All</option>' + byRole('SURVEYOR');
+  } catch (e) { WQ.toast('Reference data: ' + e.message, 'crit'); }
+
+  WQ.$('#f_status').addEventListener('change', load);
+  WQ.$('#f_to').addEventListener('change', load);
+  let t = null;
+  WQ.$('#f_q').addEventListener('input', () => { clearTimeout(t); t = setTimeout(render, 200); });
+  WQ.$('#reset').addEventListener('click', () => {
+    WQ.$('#f_status').value = ''; WQ.$('#f_to').value = ''; WQ.$('#f_q').value = ''; load();
+  });
+  WQ.$('#newBtn').addEventListener('click', () => { WQ.$('#n_err').innerHTML = ''; NEWM.open(); });
+  WQ.$('#n_go').addEventListener('click', createAssignment);
+
+  await load();
+}
+boot();
+document.addEventListener('wq:theme', render);
+</script>
+</body>
+</html>

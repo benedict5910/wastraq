@@ -1,0 +1,35 @@
+# Wastraq camera perception - phase 1 (RealSense picker tracking).
+#
+# DELIBERATELY A SEPARATE FILE from backend/requirements.txt.
+#
+# pip abandons the ENTIRE resolution on the first unsatisfiable requirement.
+# That is exactly how python-multipart silently went missing once before and
+# took the whole backend down at import time. pyrealsense2 publishes no wheel
+# for Apple Silicon and torch is large and platform-specific, so putting
+# either of them in the core requirements would mean one bad wheel stops the
+# property master, the survey module and the operations dashboard from
+# installing at all.
+#
+# The backend imports none of this at start-up. Without these installed,
+# /vision/status simply reports camera_connected=false and everything else
+# works normally.
+#
+#     ./scripts/add_realsense_picker_tracking.sh      (does this for you)
+#     .venv/bin/pip install -r backend/requirements-vision.txt
+
+# Person detection + ByteTrack / BoT-SORT multi-object tracking.
+# Pulls in torch, torchvision and opencv-python as its own dependencies.
+ultralytics>=8.2,<9.0
+
+# Explicit rather than implicit: the pipeline imports cv2 directly for the
+# overlay and the MJPEG encode.
+opencv-python>=4.8,<5.0
+
+# Intel RealSense SDK python bindings.
+#
+# NOTE FOR APPLE SILICON: there is no macOS arm64 wheel on PyPI. `pip install
+# pyrealsense2` will fail on this Mac, and the installer script says so
+# plainly rather than pretending it worked. Build librealsense with the
+# python bindings instead - docs/VISION.md has the exact commands. Everything
+# else in this file installs normally either way.
+pyrealsense2>=2.54 ; platform_system != "Darwin" or platform_machine != "arm64"

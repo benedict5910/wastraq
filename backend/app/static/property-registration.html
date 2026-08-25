@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wastraq — Property master</title>
+<link rel="stylesheet" href="/assets/wq.css">
+<style>
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 720px) { .split { grid-template-columns: 1fr; } }
+  .form-sec { border-top: 1px solid var(--line-1); padding-top: 12px; margin-top: 14px; }
+  .form-sec:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+  .form-sec > h4 { margin: 0 0 10px; font-size: 12px; letter-spacing: .05em;
+                   text-transform: uppercase; color: var(--ink-3); font-weight: 640; }
+  #regmap, #detmap { height: 210px; border-radius: 8px; overflow: hidden; }
+  .dupe { border: 1px solid var(--line-1); border-radius: 8px; padding: 9px 11px;
+          margin-bottom: 8px; background: var(--surface-2); }
+  .dupe .row { align-items: center; }
+  .id-preview { font-family: var(--font-mono, monospace); font-size: 15px;
+                font-weight: 640; color: var(--accent); }
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; }
+  .flow b { font-weight: 640; }
+  .flow .arr { color: var(--ink-3); }
+  .flow span.on { color: var(--accent); }
+  .gis-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; }
+  .gis-item { display: flex; align-items: center; gap: 8px; font-size: 13px;
+              padding: 7px 10px; border: 1px solid var(--line-1); border-radius: 8px; }
+  .gis-item .m { font-size: 14px; width: 16px; text-align: center; }
+  .gis-item.yes .m { color: var(--good); }
+  .gis-item.no  .m { color: var(--ink-3); }
+  /* buttons carry an explicit display rule, which outranks the user-agent
+     [hidden] rule - without this, .hidden = true leaves them on screen. */
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<script src="/assets/wq.js"></script>
+<script src="/assets/wq-map.js"></script>
+
+<!-- ------------------------------------------------------- detail drawer -->
+<div class="drawer-scrim" id="pd-scrim"></div>
+<aside class="drawer wide" id="pd">
+  <header>
+    <div class="stack" style="flex:1">
+      <h3 id="pd-title">Property</h3>
+      <span class="small muted" id="pd-sub"></span>
+    </div>
+    <button class="icon ghost" onclick="PD.close()">✕</button>
+  </header>
+  <div class="body" id="pd-body"></div>
+  <footer>
+    <button id="pd-edit">Edit details</button>
+    <a class="btn primary" id="pd-survey" href="#">Open field survey</a>
+  </footer>
+</aside>
+
+<!-- ---------------------------------------------------- add / edit modal -->
+<div class="modal-scrim" id="rf-scrim">
+  <div class="modal" style="width:min(880px,96vw)">
+    <header><h3 id="rf-title">Register a new property</h3>
+      <div class="spacer"></div>
+      <button class="icon ghost" onclick="RF.close()">✕</button>
+    </header>
+    <div class="body" id="rf-body"></div>
+    <footer>
+      <span class="small muted" id="rf-msg"></span>
+      <div class="spacer"></div>
+      <button onclick="RF.close()">Cancel</button>
+      <button class="primary" id="rf-save">Save property</button>
+    </footer>
+  </div>
+</div>
+
+<script>
+'use strict';
+const main = WQ.shell({
+  title: 'Property master',
+  subtitle: 'The administrative property record',
+  suite: 'Registry', user: 'Registrar'
+});
+
+/* --------------------------------------------------------------- state -- */
+let VOCAB = null;         // dropdown contents, from the database
+let ROWS = [];            // current page of the master table
+let CURRENT = null;       // property_id open in the detail drawer
+let regMap = null, detMap = null;
+let CAPTURE = null;       // { latitude, longitude, accuracy_m, source }
+let EDITING = null;       // property_id when the modal is in edit mode
+
+const unlegacy = (s) => String(s).replace(/\s*\(legacy\)$/, '');
+const prettify = (s) => String(s || '—').replace(/_/g, ' ').toLowerCase();
+// The "(legacy)" suffix steers the CREATE dropdown away from old vocabulary.
+// On a row that already uses one it is noise, so it is stripped on display.
+const typeLabel = (v) => {
+  const t = (VOCAB && VOCAB.property_types || []).find(x => x.value === v);
+  return t ? unlegacy(t.label) : prettify(v);
+};
+const entityLabel = (v) => {
+  if (!v) return '—';
+  const t = (VOCAB && VOCAB.service_entity_types || []).find(x => x.value === v);
+  return t ? unlegacy(t.label) : prettify(v);
+};
+
+/* ---------------------------------------------------------------- page -- */
+main.innerHTML = `
+  <section class="card">
+    <div class="body">
+      <div class="row wrap" style="gap:14px;align-items:flex-start">
+        <div class="stack" style="flex:1;min-width:260px;gap:6px">
+          <div class="flow">
+            <span class="on"><b>Property registration</b> stores the administrative record</span>
+            <span class="arr">→</span>
+            <span><b>Field survey</b> captures the physical GIS truth</span>
+            <span class="arr">→</span>
+            <span><b>Review</b></span>
+            <span class="arr">→</span>
+            <span><b>Operations</b></span>
+          </div>
+          <div class="small muted" id="scaleNote">
+            Every number on this page is a COUNT over the real properties table.
+            The same screen serves one lane or a whole city — the difference is
+            how many rows there are, not how the system works.
+          </div>
+        </div>
+        <button class="primary" id="addBtn">+ Add new property</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="kpis" id="kpis"></div>
+
+  <section class="card">
+    <header><h2>Find a property</h2><div class="spacer"></div>
+      <span class="small muted" id="count">—</span>
+      <button class="sm" id="reset">Reset</button></header>
+    <div class="body">
+      <div class="filters">
+        <label class="field grow" style="flex:2 1 260px"><span>Search</span>
+          <input id="f_q" placeholder="Property ID, authority ID, owner, phone, house number, street…"></label>
+        <label class="field"><span>Property type</span><select id="f_type"></select></label>
+        <label class="field"><span>Verification</span><select id="f_ver"></select></label>
+        <label class="field"><span>Survey</span><select id="f_survey"></select></label>
+        <label class="field"><span>Route</span><select id="f_route"></select></label>
+        <label class="field"><span>Ward / zone / area</span><select id="f_unit"></select></label>
+        <label class="field"><span>Record</span><select id="f_active">
+          <option value="">All</option><option value="true">Active</option>
+          <option value="false">Inactive</option></select></label>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>Properties</h2><div class="spacer"></div>
+      <span class="small muted" id="tblNote"></span></header>
+    <div class="body flush tbl-wrap" style="max-height:560px">
+      <table class="tbl">
+        <thead><tr>
+          <th>Wastraq property ID</th><th>House / building</th><th>Type</th>
+          <th>Owner / contact</th><th>Area / route</th><th>Survey</th>
+          <th>Verification</th><th>Last updated</th><th></th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+`;
+
+const PD = WQ.drawer('pd');
+const RF = WQ.modal('rf-scrim');
+
+/* ------------------------------------------------------------- filters -- */
+function filters() {
+  return {
+    q: WQ.$('#f_q').value.trim() || undefined,
+    property_type: WQ.$('#f_type').value || undefined,
+    verification_status: WQ.$('#f_ver').value || undefined,
+    survey_status: WQ.$('#f_survey').value || undefined,
+    route_id: WQ.$('#f_route').value || undefined,
+    admin_unit_id: WQ.$('#f_unit').value || undefined,
+    active: WQ.$('#f_active').value || undefined
+  };
+}
+
+function opt(sel, items, blank) {
+  WQ.$(sel).innerHTML = '<option value="">' + blank + '</option>' +
+    items.map(i => '<option value="' + WQ.esc(i.value) + '">' + WQ.esc(i.label) + '</option>').join('');
+}
+
+async function loadVocab() {
+  VOCAB = await WQ.api('/properties/master/vocabulary');
+  // Legacy vocabulary stays selectable as a FILTER (existing rows still use
+  // it) but is excluded from the create form further down.
+  opt('#f_type', VOCAB.property_types.map(t => ({ value: t.value, label: t.label })), 'All types');
+  opt('#f_ver', VOCAB.verification_statuses.map(v => ({ value: v, label: WQ.state(v).label })), 'All');
+  opt('#f_survey', VOCAB.survey_statuses.map(v => ({ value: v, label: WQ.state(v).label })), 'All');
+  opt('#f_route', VOCAB.routes.map(r => ({ value: r.route_id, label: r.route_id })), 'All routes');
+  opt('#f_unit', VOCAB.admin_units.map(u =>
+    ({ value: u.admin_unit_id, label: prettify(u.unit_type) + ' · ' + u.name })), 'Whole authority');
+}
+
+/* ---------------------------------------------------------------- KPIs -- */
+async function loadKpis() {
+  const s = await WQ.api('/properties/master/summary');
+  WQ.$('#kpis').innerHTML =
+    WQ.kpi({ label: 'Properties on record', value: WQ.num(s.total),
+             sub: WQ.num(s.active) + ' active' }) +
+    WQ.kpi({ label: 'Verified for operation', value: WQ.num(s.verified), tone: 'good',
+             sub: 'approved field survey',
+             bar: s.total ? (s.verified / s.total) * 100 : 0 }) +
+    WQ.kpi({ label: 'Pending survey', value: WQ.num(s.pending_survey), tone: 'neutral',
+             sub: 'registered, not yet mapped' }) +
+    WQ.kpi({ label: 'Pending review', value: WQ.num(s.pending_review), tone: 'warn',
+             sub: 'submitted, awaiting a reviewer' }) +
+    WQ.kpi({ label: 'Inactive', value: WQ.num(s.inactive), tone: 'neutral',
+             sub: 'deactivated, never deleted' });
+  WQ.setNavBadge('review', s.pending_review);
+}
+
+/* --------------------------------------------------------------- table -- */
+async function loadRows() {
+  WQ.$('#rows').innerHTML = WQ.skeletonRows(9, 6);
+  const r = await WQ.api('/properties/master' + WQ.qs(Object.assign(filters(), { limit: 200 })));
+  ROWS = r.items;
+  WQ.$('#count').textContent = r.total + (r.total === 1 ? ' property' : ' properties');
+  WQ.$('#tblNote').textContent = r.total > r.items.length
+    ? 'showing the first ' + r.items.length : '';
+
+  if (!ROWS.length) {
+    WQ.$('#rows').innerHTML = '<tr><td colspan="9">' +
+      WQ.emptyState('No property matches these filters',
+                    'Clear the filters, or register a new property.') + '</td></tr>';
+    return;
+  }
+  WQ.$('#rows').innerHTML = ROWS.map(p =>
+    '<tr data-id="' + WQ.esc(p.property_id) + '" style="cursor:pointer">' +
+    '<td><span class="mono">' + WQ.esc(p.property_id) + '</span>' +
+      (p.authority_property_id
+        ? '<div class="small muted">auth ' + WQ.esc(p.authority_property_id) + '</div>' : '') +
+      (p.active ? '' : '<div class="small muted">inactive</div>') + '</td>' +
+    '<td>' + WQ.esc(p.house_number || '—') +
+      (p.street_name ? '<div class="small muted trunc">' + WQ.esc(p.street_name) + '</div>' : '') + '</td>' +
+    '<td>' + WQ.esc(typeLabel(p.property_type)) +
+      (p.service_entity_type
+        ? '<div class="small muted">' + WQ.esc(entityLabel(p.service_entity_type)) + '</div>' : '') + '</td>' +
+    '<td>' + WQ.esc(p.owner_name || '—') +
+      (p.owner_phone ? '<div class="small muted mono">' + WQ.esc(p.owner_phone) + '</div>' : '') + '</td>' +
+    '<td>' + WQ.esc(p.ward_name || p.admin_unit_name || '—') +
+      (p.route_id ? '<div class="small muted">' + WQ.esc(p.route_id) + '</div>' : '') + '</td>' +
+    '<td>' + WQ.chip(p.survey_status) + '</td>' +
+    '<td>' + WQ.chip(p.verification_status) + '</td>' +
+    '<td class="nowrap small">' + WQ.ago(p.last_activity_at) + '</td>' +
+    '<td><button class="sm">Open</button></td></tr>').join('');
+
+  WQ.$$('#rows tr[data-id]').forEach(tr =>
+    tr.addEventListener('click', () => openDetail(tr.getAttribute('data-id'))));
+}
+
+/* ------------------------------------------------------- detail drawer -- */
+async function openDetail(pid) {
+  CURRENT = pid;
+  PD.open();
+  WQ.$('#pd-title').textContent = pid;
+  WQ.$('#pd-sub').textContent = 'loading…';
+  WQ.$('#pd-body').innerHTML =
+    '<section class="card"><div class="body"><div class="skel" style="width:70%"></div>' +
+    '<div class="skel" style="width:45%;margin-top:8px"></div>' +
+    '<div class="skel" style="width:60%;margin-top:8px"></div></div></section>';
+  WQ.$('#pd-survey').href = '/survey/field?property=' + encodeURIComponent(pid);
+
+  if (detMap) { detMap.destroy(); detMap = null; }
+  const [p, st, hist] = await Promise.all([
+    WQ.api('/properties/' + encodeURIComponent(pid) + '/master'),
+    WQ.api('/properties/' + encodeURIComponent(pid) + '/survey-status'),
+    WQ.api('/properties/' + encodeURIComponent(pid) + '/history?limit=12')
+  ]);
+
+  WQ.$('#pd-sub').innerHTML = WQ.chip(p.verification_status) + ' ' + WQ.chip(p.survey_status);
+  const loc = st.captured_location;
+  const gisItem = (label, ok) =>
+    '<div class="gis-item ' + (ok ? 'yes' : 'no') + '"><span class="m">' +
+    (ok ? '✓' : '○') + '</span><span>' + label + '</span></div>';
+
+  WQ.$('#pd-body').innerHTML =
+    '<section class="card"><header><h2>Property details</h2></header><div class="body">' +
+      '<dl class="kv">' +
+        row('Wastraq ID', '<span class="mono">' + WQ.esc(p.property_id) + '</span>') +
+        row('Authority ID', p.authority_property_id) +
+        row('House / building', p.house_number) +
+        row('Property type', typeLabel(p.property_type)) +
+        row('Service entity', entityLabel(p.service_entity_type)) +
+        row('Owner', p.owner_name) +
+        row('Phone', p.owner_phone) +
+        row('Email', p.owner_email) +
+        row('Address', p.formatted_address) +
+        row('Ward / zone', [p.ward_name, p.zone_name].filter(Boolean).join(' · ')) +
+        row('Route', p.route_id) +
+        row('Record', p.active ? 'Active'
+            : '<span>Inactive' + (p.inactive_reason
+                ? ' — ' + WQ.esc(p.inactive_reason) : '') + '</span>') +
+        row('Registered', WQ.dateOf(p.created_at) + (p.created_by ? ' by ' + WQ.esc(p.created_by) : '')) +
+        row('Last updated', WQ.dateOf(p.updated_at) + (p.updated_by ? ' by ' + WQ.esc(p.updated_by) : '')) +
+      '</dl></div></section>' +
+
+    '<section class="card"><header><h2>Location</h2><div class="spacer"></div>' +
+      '<span class="small muted">reference point, not survey geometry</span></header>' +
+      '<div class="body">' +
+      (loc
+        ? '<div class="gnss-readout"><span class="lbl">lat</span> ' + loc.latitude.toFixed(6) +
+          ' &nbsp;<span class="lbl">lon</span> ' + loc.longitude.toFixed(6) +
+          ' &nbsp;<span class="lbl">±</span> <span class="' + accClass(loc.accuracy_m) + '">' +
+          (loc.accuracy_m == null ? '?' : loc.accuracy_m.toFixed(0) + ' m') + '</span></div>' +
+          '<div class="small muted" style="margin:6px 0 10px">' +
+          WQ.esc(loc.source || '').replace(/_/g, ' ').toLowerCase() + ' · ' +
+          WQ.dateOf(loc.captured_at) + ' · ' + WQ.esc(loc.accuracy_verdict.message) + '</div>'
+        : '<div class="note-box small">No reference location captured at registration. ' +
+          'The field survey will establish the entrance point.</div>') +
+      '<div id="detmap"></div></div></section>' +
+
+    '<section class="card"><header><h2>Survey state</h2></header><div class="body">' +
+      '<dl class="kv">' +
+        row('Survey status', WQ.chip(st.survey_status)) +
+        row('Surveyor', st.surveyor_name) +
+        row('Submitted', st.submitted_at ? WQ.dateOf(st.submitted_at) : '—') +
+        row('Reviewed', st.reviewed_at ? WQ.dateOf(st.reviewed_at) + ' · ' +
+             WQ.esc(st.review_status || '') : '—') +
+        row('Open QA issues', String(st.open_qa_issues)) +
+      '</dl></div></section>' +
+
+    '<section class="card"><header><h2>GIS state</h2><div class="spacer"></div>' +
+      '<span class="small muted">captured in the field survey</span></header><div class="body">' +
+      '<div class="gis-grid">' +
+        gisItem('Entrance point', st.gis.entrance) +
+        gisItem('Frontage line', st.gis.frontage) +
+        gisItem('Service zone', st.gis.service_zone) +
+        gisItem('Frontage photo', st.gis.frontage_photo) +
+      '</div>' +
+      (st.missing.length
+        ? '<div class="note-box small" style="margin-top:10px">Still to capture: ' +
+          WQ.esc(st.missing.join(', ').replace(/_/g, ' ')) + '.</div>'
+        : '<div class="note-box small" style="margin-top:10px">Fully mapped.</div>') +
+      '</div></section>' +
+
+    '<section class="card"><header><h2>Actions</h2></header><div class="body">' +
+      '<div class="row wrap">' +
+        '<a class="btn" href="/survey/field?property=' + encodeURIComponent(p.property_id) +
+          '">Open field survey</a>' +
+        '<a class="btn" href="/survey/map?property=' + encodeURIComponent(p.property_id) +
+          '">View on survey map</a>' +
+        (st.gis.frontage_photo
+          ? '<a class="btn" href="/properties/' + encodeURIComponent(p.property_id) +
+            '/photo" target="_blank" rel="noopener">View frontage photo</a>' : '') +
+        '<button class="sm" id="pd-dupes">Check for duplicates</button>' +
+        '<button class="sm" id="pd-toggle">' +
+          (p.active ? 'Deactivate record' : 'Reactivate record') + '</button>' +
+      '</div>' +
+      '<div id="pd-dupe-out" style="margin-top:10px"></div>' +
+      '</div></section>' +
+
+    '<section class="card"><header><h2>Change history</h2><div class="spacer"></div>' +
+      '<span class="small muted">administrative record only</span></header>' +
+      '<div class="body flush tbl-wrap" style="max-height:220px"><table class="tbl">' +
+      '<thead><tr><th>When</th><th>Action</th><th>Field</th><th>From → to</th><th>By</th></tr></thead>' +
+      '<tbody>' + (hist.items.length ? hist.items.map(h =>
+        '<tr><td class="nowrap small">' + WQ.dateOf(h.changed_at) + '</td>' +
+        '<td class="small">' + WQ.esc(h.action.replace(/_/g, ' ').toLowerCase()) + '</td>' +
+        '<td class="small">' + WQ.esc(h.field_name || '—') + '</td>' +
+        '<td class="small trunc">' + WQ.esc(h.old_value || '—') + ' → ' +
+          WQ.esc(h.new_value || h.note || '—') + '</td>' +
+        '<td class="small">' + WQ.esc(h.changed_by || '—') + '</td></tr>').join('')
+        : '<tr><td colspan="5" class="small muted" style="padding:12px">' +
+          'No administrative changes recorded yet.</td></tr>') +
+      '</tbody></table></div></section>';
+
+  WQ.$('#pd-edit').onclick = () => openForm(p);
+  WQ.$('#pd-toggle').onclick = () => toggleActive(p);
+  WQ.$('#pd-dupes').onclick = () => showDupes(p.property_id);
+
+  // Reference fix + neighbours, so "is this the right building" is answerable
+  // without leaving the drawer.
+  const lat = (loc && loc.latitude) || p.latitude, lon = (loc && loc.longitude) || p.longitude;
+  if (lat != null && lon != null) {
+    detMap = WQMap.create(WQ.$('#detmap'), { center: [lat, lon], zoom: 19 });
+    detMap.setLayers([{
+      id: 'here', type: 'point', data: fc([{ id: p.property_id, lat: lat, lon: lon, me: true }]),
+      style: () => ({ fill: WQ.stateColour('SUBMITTED'), stroke: '#fff', radius: 7 })
+    }, {
+      id: 'others', type: 'point',
+      data: fc(ROWS.filter(r => r.property_id !== p.property_id &&
+          (r.captured_latitude != null || r.latitude != null))
+        .map(r => ({ id: r.property_id,
+                     lat: r.captured_latitude != null ? r.captured_latitude : r.latitude,
+                     lon: r.captured_longitude != null ? r.captured_longitude : r.longitude }))),
+      style: () => ({ fill: WQ.stateColour('NOT_SURVEYED'), stroke: 'rgba(0,0,0,.4)', radius: 4 })
+    }]);
+    detMap.setTooltip(hit => hit.id);
+  } else {
+    WQ.$('#detmap').innerHTML = WQ.emptyState('No coordinate on record');
+  }
+}
+
+function row(k, v) {
+  return '<dt>' + WQ.esc(k) + '</dt><dd>' +
+         (v === null || v === undefined || v === '' ? '—' :
+          (/^</.test(String(v)) ? v : WQ.esc(v))) + '</dd>';
+}
+function fc(pts) {
+  return { type: 'FeatureCollection', features: pts.filter(p => p.lat != null && p.lon != null)
+    .map(p => ({ type: 'Feature', id: p.id,
+                 geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+                 properties: { id: p.id } })) };
+}
+function accClass(m) {
+  if (m == null) return 'muted';
+  const t = VOCAB.thresholds;
+  if (m > t.registration_accuracy_warn_m) return 'acc-bad';
+  if (m > t.gnss_accuracy_warn_m) return 'acc-warn';
+  return 'acc-ok';
+}
+
+async function showDupes(pid) {
+  const out = WQ.$('#pd-dupe-out');
+  out.innerHTML = '<span class="small muted">checking…</span>';
+  const r = await WQ.api('/properties/' + encodeURIComponent(pid) + '/possible-duplicates');
+  out.innerHTML = r.candidates.length
+    ? '<div class="small muted" style="margin-bottom:6px">' + WQ.esc(r.note) + '</div>' +
+      r.candidates.map(dupeCard).join('')
+    : '<div class="note-box small">No similar property found within ' + r.radius_m + ' m.</div>';
+}
+
+function dupeCard(c) {
+  return '<div class="dupe"><div class="row">' +
+    '<div class="stack" style="flex:1;gap:2px">' +
+      '<div><span class="mono">' + WQ.esc(c.property_id) + '</span> · ' +
+      WQ.esc(c.owner_name || c.house_number || '—') + '</div>' +
+      '<div class="small muted">' + WQ.esc(c.reasons.join(' · ')) + '</div>' +
+    '</div>' +
+    '<span class="chip ' + (c.similarity >= 0.8 ? 'warn' : 'neutral') + '"><span class="dot"></span>' +
+      Math.round(c.similarity * 100) + '% match</span>' +
+    '<button class="sm" onclick="openDetail(\'' + WQ.esc(c.property_id) + '\')">Open existing</button>' +
+  '</div></div>';
+}
+
+async function toggleActive(p) {
+  const on = !p.active;
+  let reason = null;
+  if (!on) {
+    if (!await WQ.confirmDialog(
+        'Deactivate ' + p.property_id + '? The record and all its history stay in the ' +
+        'database — it is hidden from active operations, never deleted.',
+        'Deactivate', 'danger')) return;
+    reason = 'Deactivated from the Property Master';
+  }
+  await WQ.api('/properties/' + encodeURIComponent(p.property_id), {
+    method: 'PATCH',
+    body: { active: on, inactive_reason: reason, updated_by: 'registrar' }
+  });
+  WQ.toast(p.property_id + (on ? ' reactivated' : ' deactivated'), 'good');
+  await refresh(); openDetail(p.property_id);
+}
+
+/* ---------------------------------------------------------- add / edit -- */
+function openForm(existing) {
+  EDITING = existing ? existing.property_id : null;
+  CAPTURE = null;
+  if (regMap) { regMap.destroy(); regMap = null; }
+  const p = existing || {};
+  const live = (list) => list.filter(t => !t.legacy);
+  const sel = (id, list, cur, blank) =>
+    '<select id="' + id + '">' + (blank ? '<option value="">' + blank + '</option>' : '') +
+    list.map(t => '<option value="' + WQ.esc(t.value) + '"' +
+      (t.value === cur ? ' selected' : '') + '>' + WQ.esc(t.label) + '</option>').join('') +
+    // Keep a legacy value selectable while EDITING a row that already has one,
+    // so opening the form cannot silently rewrite it.
+    (cur && !list.some(t => t.value === cur)
+      ? '<option value="' + WQ.esc(cur) + '" selected>' + WQ.esc(cur) + ' (existing)</option>' : '') +
+    '</select>';
+
+  WQ.$('#rf-title').textContent = existing
+    ? 'Edit ' + existing.property_id : 'Register a new property';
+  WQ.$('#rf-msg').textContent = '';
+  WQ.$('#rf-save').textContent = existing ? 'Save changes' : 'Save property';
+
+  WQ.$('#rf-body').innerHTML = `
+    <div class="form-sec">
+      <h4>Identity</h4>
+      <div class="split">
+        <div class="stack" style="gap:4px">
+          <span class="small muted">Wastraq property ID</span>
+          <span class="id-preview" id="rf-id">${existing ? WQ.esc(existing.property_id)
+            : WQ.esc(VOCAB.next_property_id)}</span>
+          <span class="small muted">${existing ? 'permanent identifier'
+            : 'generated by the server when you save'}</span>
+        </div>
+        <label class="field"><span>Authority property ID (optional)</span>
+          <input id="rf-auth" value="${WQ.esc(p.authority_property_id || '')}"
+                 placeholder="ULB / PID reference"></label>
+      </div>
+      <label class="field" style="margin-top:10px"><span>House / building number</span>
+        <input id="rf-house" value="${WQ.esc(p.house_number || '')}" placeholder="e.g. D-114"></label>
+    </div>
+
+    <div class="form-sec">
+      <h4>Property</h4>
+      <div class="split">
+        <label class="field"><span>Property type</span>
+          ${sel('rf-type', existing ? VOCAB.property_types : live(VOCAB.property_types),
+                p.property_type || 'INDEPENDENT_HOUSE', null)}</label>
+        <label class="field"><span>Service entity type</span>
+          ${sel('rf-entity', existing ? VOCAB.service_entity_types
+                : live(VOCAB.service_entity_types), p.service_entity_type, 'Not set')}</label>
+      </div>
+      <div class="small muted" style="margin-top:6px">
+        Property type is what the building is. Service entity type is what the
+        vehicle services here — a gated community can be one common collection point.
+      </div>
+    </div>
+
+    <div class="form-sec">
+      <h4>Owner / primary contact <span class="muted">— all optional</span></h4>
+      <div class="split">
+        <label class="field"><span>Name</span>
+          <input id="rf-owner" value="${WQ.esc(p.owner_name || '')}"></label>
+        <label class="field"><span>Phone</span>
+          <input id="rf-phone" value="${WQ.esc(p.owner_phone || '')}"></label>
+      </div>
+      <label class="field" style="margin-top:10px"><span>Email</span>
+        <input id="rf-email" type="email" value="${WQ.esc(p.owner_email || '')}"></label>
+    </div>
+
+    <div class="form-sec">
+      <h4>Address</h4>
+      <div class="split">
+        <label class="field"><span>Street</span>
+          <input id="rf-street" value="${WQ.esc(p.street_name || '')}"></label>
+        <label class="field"><span>Locality</span>
+          <input id="rf-locality" value="${WQ.esc(p.locality || '')}"></label>
+      </div>
+      <div class="split" style="margin-top:10px">
+        <label class="field"><span>Pincode</span>
+          <input id="rf-pin" value="${WQ.esc(p.pincode || '')}"></label>
+        <label class="field"><span>Collection route</span>
+          <input id="rf-route" list="rf-routes" value="${WQ.esc(p.route_id || '')}"
+                 placeholder="e.g. ROUTE-DEMO-01">
+          <datalist id="rf-routes">${VOCAB.routes.map(r =>
+            '<option value="' + WQ.esc(r.route_id) + '">').join('')}</datalist></label>
+      </div>
+      <label class="field" style="margin-top:10px">
+        <span>City / zone / ward / area</span>
+        ${sel('rf-unit', VOCAB.admin_units.map(u =>
+          ({ value: u.admin_unit_id, label: prettify(u.unit_type) + ' · ' + u.name })),
+          p.admin_unit_id, 'Not linked')}</label>
+    </div>
+
+    <div class="form-sec" id="rf-loc-sec">
+      <h4>Reference location</h4>
+      <div class="row wrap">
+        <button class="sm primary" id="rf-capture">Capture current location</button>
+        <button class="sm" id="rf-retake" hidden>Retake</button>
+        <span class="small muted" id="rf-loc-msg">Uses this device's location. Optional —
+          the field survey establishes the real entrance point.</span>
+      </div>
+      <div class="gnss-readout" id="rf-readout" style="margin-top:10px" hidden></div>
+      <div id="rf-acc-note"></div>
+      <div id="regmap" style="margin-top:10px" hidden></div>
+    </div>
+
+    <div class="form-sec" id="rf-dupe-sec" ${existing ? 'hidden' : ''}>
+      <h4>Possible existing property</h4>
+      <div id="rf-dupes"><span class="small muted">Checked automatically before saving.</span></div>
+    </div>
+  `;
+
+  WQ.$('#rf-capture').onclick = capture;
+  WQ.$('#rf-retake').onclick = capture;
+  if (!existing) {
+    ['rf-auth', 'rf-house', 'rf-street', 'rf-owner', 'rf-phone']
+      .forEach(id => WQ.$('#' + id).addEventListener('change', checkDupes));
+  }
+  WQ.$('#rf-save').onclick = save;
+  RF.open();
+}
+
+function formValues() {
+  const v = (id) => (WQ.$('#' + id).value || '').trim() || null;
+  return {
+    authority_property_id: v('rf-auth'), house_number: v('rf-house'),
+    property_type: WQ.$('#rf-type').value,
+    service_entity_type: WQ.$('#rf-entity').value || null,
+    owner_name: v('rf-owner'), owner_phone: v('rf-phone'), owner_email: v('rf-email'),
+    street_name: v('rf-street'), locality: v('rf-locality'), pincode: v('rf-pin'),
+    route_id: v('rf-route'), admin_unit_id: WQ.$('#rf-unit').value || null
+  };
+}
+
+/* Device geolocation. Latitude and longitude are never required text fields:
+   the clerk presses a button, and a bad fix is recorded and flagged rather
+   than rejected or silently trusted. */
+function capture() {
+  const msg = WQ.$('#rf-loc-msg');
+  if (!navigator.geolocation) {
+    msg.textContent = 'This browser will not share a location. Registration can continue without one.';
+    return;
+  }
+  msg.textContent = 'Locating…';
+  WQ.$('#rf-capture').disabled = true;
+  navigator.geolocation.getCurrentPosition(pos => {
+    WQ.$('#rf-capture').disabled = false;
+    CAPTURE = {
+      latitude: pos.coords.latitude, longitude: pos.coords.longitude,
+      accuracy_m: pos.coords.accuracy == null ? null : Math.round(pos.coords.accuracy),
+      source: 'DEVICE_GEOLOCATION'
+    };
+    renderCapture();
+    if (!EDITING) checkDupes();
+  }, err => {
+    WQ.$('#rf-capture').disabled = false;
+    msg.textContent = 'Location unavailable (' + err.message +
+      '). You can save the property and capture the position during the field survey.';
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+}
+
+function renderCapture() {
+  const t = VOCAB.thresholds;
+  WQ.$('#rf-capture').hidden = true;
+  WQ.$('#rf-retake').hidden = false;
+  WQ.$('#rf-loc-msg').textContent = 'Captured from this device.';
+  const ro = WQ.$('#rf-readout');
+  ro.hidden = false;
+  ro.innerHTML = '<span class="lbl">lat</span> ' + CAPTURE.latitude.toFixed(6) +
+    ' &nbsp;<span class="lbl">lon</span> ' + CAPTURE.longitude.toFixed(6) +
+    ' &nbsp;<span class="lbl">±</span> <span class="' + accClass(CAPTURE.accuracy_m) + '">' +
+    (CAPTURE.accuracy_m == null ? 'unknown' : CAPTURE.accuracy_m + ' m') + '</span>';
+
+  WQ.$('#rf-acc-note').innerHTML =
+    (CAPTURE.accuracy_m != null && CAPTURE.accuracy_m > t.registration_accuracy_warn_m)
+      ? '<div class="warn-box small" style="margin-top:8px">Low GPS accuracy — location ' +
+        'may need field correction. You can retake it, save it as approximate, or leave ' +
+        'the position to the field survey. It will not be treated as verified either way.</div>'
+      : '<div class="small muted" style="margin-top:6px">Stored as a reference point. ' +
+        'The entrance, frontage and service zone are captured in the field survey.</div>';
+
+  const el = WQ.$('#regmap');
+  el.hidden = false;
+  if (!regMap) regMap = WQMap.create(el, { center: [CAPTURE.latitude, CAPTURE.longitude], zoom: 19 });
+  regMap.setCenter(CAPTURE.latitude, CAPTURE.longitude, 19);
+  regMap.setLayers([{
+    id: 'new', type: 'point',
+    data: fc([{ id: 'new', lat: CAPTURE.latitude, lon: CAPTURE.longitude }]),
+    style: () => ({ fill: WQ.stateColour('SUBMITTED'), stroke: '#fff', radius: 7 })
+  }, {
+    id: 'existing', type: 'point',
+    data: fc(ROWS.map(r => ({ id: r.property_id,
+      lat: r.captured_latitude != null ? r.captured_latitude : r.latitude,
+      lon: r.captured_longitude != null ? r.captured_longitude : r.longitude }))),
+    style: () => ({ fill: WQ.stateColour('NOT_SURVEYED'), stroke: 'rgba(0,0,0,.4)', radius: 4 })
+  }]);
+  regMap.setTooltip(hit => hit.id === 'new' ? 'New property (approx.)' : hit.id);
+}
+
+let dupeTimer = null;
+function checkDupes() {
+  clearTimeout(dupeTimer);
+  dupeTimer = setTimeout(async () => {
+    const f = formValues();
+    const probe = {
+      authority_property_id: f.authority_property_id, house_number: f.house_number,
+      street_name: f.street_name, owner_name: f.owner_name, owner_phone: f.owner_phone,
+      latitude: CAPTURE && CAPTURE.latitude, longitude: CAPTURE && CAPTURE.longitude
+    };
+    if (!Object.values(probe).some(v => v !== null && v !== undefined)) return;
+    const r = await WQ.api('/properties/duplicate-check', { method: 'POST', body: probe });
+    WQ.$('#rf-dupes').innerHTML = r.candidates.length
+      ? '<div class="' + (r.decision === 'POSSIBLE_DUPLICATE' ? 'warn-box' : 'note-box') +
+        ' small" style="margin-bottom:8px">' +
+        (r.decision === 'POSSIBLE_DUPLICATE'
+          ? 'Possible existing property found. Open it, or carry on creating a new one — ' +
+            'nothing is merged automatically.'
+          : 'Nearby properties, for context — none of them looks like this one. ' +
+            'Carry on; nothing is merged automatically.') + '</div>' +
+        r.candidates.map(dupeCard).join('')
+      : '<span class="small muted">No similar property found.</span>';
+  }, 350);
+}
+
+async function save() {
+  const btn = WQ.$('#rf-save');
+  btn.disabled = true;
+  WQ.$('#rf-msg').textContent = 'Saving…';
+  try {
+    if (EDITING) {
+      await WQ.api('/properties/' + encodeURIComponent(EDITING), {
+        method: 'PATCH', body: Object.assign(formValues(), { updated_by: 'registrar' })
+      });
+      if (CAPTURE) {
+        await WQ.api('/properties/' + encodeURIComponent(EDITING) + '/capture-location', {
+          method: 'POST', body: Object.assign({}, CAPTURE, { captured_by: 'registrar' })
+        });
+      }
+      WQ.toast(EDITING + ' updated', 'good');
+      RF.close();
+      await refresh(); openDetail(EDITING);
+    } else {
+      const body = Object.assign(formValues(), { created_by: 'registrar' });
+      if (CAPTURE) {
+        body.captured_latitude = CAPTURE.latitude;
+        body.captured_longitude = CAPTURE.longitude;
+        body.captured_accuracy_m = CAPTURE.accuracy_m;
+        body.location_source = CAPTURE.source;
+      }
+      const r = await WQ.api('/properties', { method: 'POST', body: body });
+      RF.close();
+      WQ.toast(r.property.property_id + ' registered — pending survey', 'good');
+      await refresh();
+      openDetail(r.property.property_id);
+    }
+  } catch (e) {
+    WQ.$('#rf-msg').textContent = e.message;
+    WQ.toast('Save failed: ' + e.message, 'crit');
+  } finally {
+    btn.disabled = false;
+    if (WQ.$('#rf-msg').textContent === 'Saving…') WQ.$('#rf-msg').textContent = '';
+  }
+}
+
+/* --------------------------------------------------------------- wiring -- */
+async function refresh() { await Promise.all([loadKpis(), loadRows()]); }
+
+WQ.$('#addBtn').onclick = () => openForm(null);
+WQ.$('#reset').onclick = () => {
+  ['f_q', 'f_type', 'f_ver', 'f_survey', 'f_route', 'f_unit', 'f_active']
+    .forEach(id => { WQ.$('#' + id).value = ''; });
+  loadRows();
+};
+['f_type', 'f_ver', 'f_survey', 'f_route', 'f_unit', 'f_active']
+  .forEach(id => WQ.$('#' + id).addEventListener('change', loadRows));
+let qTimer = null;
+WQ.$('#f_q').addEventListener('input', () => {
+  clearTimeout(qTimer); qTimer = setTimeout(loadRows, 250);
+});
+
+(async function boot() {
+  try {
+    await loadVocab();
+    await refresh();
+    const want = WQ.param('property');
+    if (want) openDetail(want);
+  } catch (e) {
+    main.insertAdjacentHTML('afterbegin',
+      '<div class="err-box">Could not load the property master: ' + WQ.esc(e.message) + '</div>');
+  }
+})();
+</script>
+</body>
+</html>

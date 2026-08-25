@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wastraq — Picker tracking (camera-local)</title>
+<link rel="stylesheet" href="/assets/wq.css">
+<style>
+  .pt-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, 1fr); gap: 14px; align-items: start; }
+  @media (max-width: 1080px) { .pt-grid { grid-template-columns: 1fr; } }
+  .feed-shell { position: relative; background: #101215; border-radius: 10px; overflow: hidden;
+                display: flex; align-items: center; justify-content: center; min-height: 300px; }
+  .feed-shell img { width: 100%; display: block; }
+  .feed-shell .placeholder { color: #8b939c; font-size: 13px; padding: 40px 20px; text-align: center; line-height: 1.6; }
+  #topdown { width: 100%; height: 420px; display: block; border-radius: 10px; }
+  .tk-sel { cursor: pointer; }
+  .tk-sel.on td { background: rgba(120,160,255,.10); }
+  .conv { font-size: 12px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<script src="/assets/wq.js"></script>
+<script>
+const main = WQ.shell({
+  title: 'Picker tracking',
+  subtitle: 'RealSense → person detection → persistent track → camera-local X / Z',
+  suite: 'Perception',
+  user: 'Operator'
+});
+
+main.innerHTML = `
+  <div class="note-box small" style="margin-bottom:12px">
+    <strong>Camera-local coordinates only.</strong>
+    The RealSense is treated as a fixed stationary reference frame. There is no GNSS,
+    no vehicle pose and no property association in this phase — nothing on this page is
+    a latitude/longitude, and nothing here is a collection episode yet.
+  </div>
+
+  <div class="row wrap" style="gap:10px; margin-bottom:12px">
+    <button class="primary" id="startBtn">Start camera</button>
+    <button id="stopBtn">Stop</button>
+    <span class="status-pill" id="camPill"><span class="dot"></span><span>camera</span></span>
+    <span class="status-pill" id="detPill"><span class="dot"></span><span>detector</span></span>
+    <span class="status-pill" id="trkPill"><span class="dot"></span><span>tracker</span></span>
+    <div class="spacer" style="flex:1"></div>
+    <label class="field" style="min-width:150px">
+      <span>Top-down range</span>
+      <select id="rangeSel">
+        <option value="4">0 – 4 m</option>
+        <option value="6" selected>0 – 6 m</option>
+        <option value="8">0 – 8 m</option>
+        <option value="12">0 – 12 m</option>
+      </select>
+    </label>
+    <label class="field" style="min-width:120px">
+      <span>Trail</span>
+      <div class="seg" id="trailSeg">
+        <button data-v="1" class="on">on</button><button data-v="0">off</button>
+      </div>
+    </label>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="pt-grid" style="margin-top:14px">
+    <div class="card">
+      <div class="section-title">Live feed — annotated</div>
+      <div class="feed-shell" id="feedShell">
+        <div class="placeholder" id="feedPlaceholder">Camera stopped.<br>Press <strong>Start camera</strong>.</div>
+      </div>
+      <div class="small muted" style="margin-top:8px">
+        Box, <span class="mono">TRACK-nn</span>, detection confidence, and the smoothed
+        X / Z in metres. A cross marks the exact pixel the depth was measured at.
+        A track with no trustworthy depth is drawn amber and labelled
+        <span class="mono">depth invalid</span> — never with a made-up number.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Camera-local top-down</div>
+      <canvas id="topdown"></canvas>
+      <div class="small muted" style="margin-top:8px">
+        Camera at the origin, looking up the page. <span class="mono">+x</span> right,
+        <span class="mono">+z</span> away from the lens. This is <em>not</em> the GIS map.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="section-title">Live tracks</div>
+    <div class="tbl-wrap">
+      <table id="tkTbl">
+        <thead><tr>
+          <th>Track</th><th>Conf</th><th>Depth</th>
+          <th>X raw</th><th>Z raw</th><th>X smoothed</th><th>Z smoothed</th>
+          <th>Anchor</th><th>Age</th><th>Frames</th>
+        </tr></thead>
+        <tbody><tr><td colspan="10" class="muted small">No tracks.</td></tr></tbody>
+      </table>
+    </div>
+    <div class="small muted" style="margin-top:8px">
+      Click a row to select it for calibration. A camera track id is
+      <strong>not</strong> a worker identity.
+    </div>
+  </div>
+
+  <div class="pt-grid" style="margin-top:14px">
+    <div class="card">
+      <div class="section-title">Calibration / debug</div>
+      <div class="row wrap" style="gap:10px; align-items:flex-end">
+        <label class="field" style="min-width:200px">
+          <span>Where are you actually standing?</span>
+          <select id="calPreset">
+            <option value="0,2">2 m forward</option>
+            <option value="0,3">3 m forward</option>
+            <option value="0,4">4 m forward</option>
+            <option value="-1,2">2 m forward + 1 m left</option>
+            <option value="1,2">2 m forward + 1 m right</option>
+            <option value="-1,4">4 m forward + 1 m left</option>
+            <option value="1,4">4 m forward + 1 m right</option>
+          </select>
+        </label>
+        <button class="primary" id="calBtn">Capture</button>
+        <button id="calClear">Clear</button>
+      </div>
+      <div class="tbl-wrap" style="margin-top:10px">
+        <table id="calTbl">
+          <thead><tr><th>Expected</th><th>Measured</th><th>Error X</th><th>Error Z</th><th>Total</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted small">No samples yet.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Status</div>
+      <dl class="kv" id="statusKv"></dl>
+      <div class="section-title" style="margin-top:14px">Coordinate convention</div>
+      <div class="conv muted" id="convBox"></div>
+    </div>
+  </div>
+`;
+
+const $ = WQ.$, esc = WQ.esc;
+// The shared WQ.chip() maps a domain state vocabulary (SEGREGATED, NEEDS_REVIEW
+// and friends). Depth validity is not part of it, so this page renders its own
+// chips with the same classes rather than teaching wq.js a perception word.
+const chip = (cls, text) => '<span class="chip ' + cls + '"><span class="dot"></span>' + esc(text) + '</span>';
+let STATUS = null, TRACKS = [], SELECTED = null, TRAIL = true, RANGE = 6;
+let streaming = false;
+
+// ---------------------------------------------------------------- controls --
+$('#rangeSel').addEventListener('change', e => { RANGE = parseFloat(e.target.value); drawTopDown(); });
+$('#trailSeg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  [...e.currentTarget.children].forEach(c => c.classList.toggle('on', c === b));
+  TRAIL = b.dataset.v === '1'; drawTopDown();
+});
+
+$('#startBtn').addEventListener('click', async () => {
+  $('#startBtn').disabled = true;
+  try {
+    const r = await WQ.api('/vision/start', { method: 'POST' });
+    WQ.toast(r.started ? 'Camera starting…' : 'Already running', 'good');
+    await refreshStatus();
+  } catch (e) { WQ.toast('Start failed: ' + e.message, 'crit'); }
+  finally { $('#startBtn').disabled = false; }
+});
+
+$('#stopBtn').addEventListener('click', async () => {
+  try {
+    await WQ.api('/vision/stop', { method: 'POST' });
+    stopStream();
+    WQ.toast('Camera released', 'good');
+    await refreshStatus();
+  } catch (e) { WQ.toast('Stop failed: ' + e.message, 'crit'); }
+});
+
+// The MJPEG element is only attached once the pipeline is actually running:
+// pointing an <img> at a stream that will never produce a frame just leaves a
+// broken image and a hanging request.
+function startStream() {
+  if (streaming) return;
+  streaming = true;
+  $('#feedShell').innerHTML =
+    '<img id="feedImg" alt="Annotated RealSense feed" src="/vision/stream.mjpeg?t=' + Date.now() + '">';
+}
+function stopStream(msg) {
+  streaming = false;
+  $('#feedShell').innerHTML =
+    '<div class="placeholder">' + (msg || 'Camera stopped.<br>Press <strong>Start camera</strong>.') + '</div>';
+}
+
+// ------------------------------------------------------------------ status --
+function pill(id, on, label, waiting) {
+  const el = $(id);
+  el.classList.toggle('down', !on && !waiting);
+  el.classList.toggle('wait', !!waiting && !on);
+  el.lastElementChild.textContent = label;
+}
+
+async function refreshStatus() {
+  try { STATUS = await WQ.api('/vision/status'); }
+  catch (e) { STATUS = null; }
+  if (!STATUS) {
+    pill('#camPill', false, 'backend?');
+    return;
+  }
+  const s = STATUS;
+  pill('#camPill', s.camera_connected, s.camera_connected ? 'camera' : (s.state || 'no camera').toLowerCase(),
+       s.state === 'STARTING');
+  pill('#detPill', s.detector_loaded, s.detector_loaded ? 'detector' : 'no detector');
+  pill('#trkPill', s.tracker_active, s.tracker_active ? 'tracker' : 'tracker off');
+
+  if (s.camera_connected && s.running) startStream();
+  else if (!s.running) stopStream(
+    s.last_error ? ('Camera not running.<br><span class="mono">' + esc(s.last_error) + '</span>')
+                 : null);
+  else if (!s.camera_connected) stopStream(
+    'Waiting for the camera…<br><span class="mono">' + esc(s.last_error || s.state) + '</span>');
+
+  const i = s.intrinsics;
+  $('#statusKv').innerHTML = [
+    ['state', s.state],
+    ['device', s.device || '—'],
+    ['model / tracker', (s.model || '—') + ' · ' + (s.tracker || '—')],
+    ['fps', s.fps ? s.fps.toFixed(1) : '—'],
+    ['frames processed', s.frames_processed],
+    ['latest frame', s.latest_frame_timestamp ? WQ.timeOf(s.latest_frame_timestamp) : '—'],
+    ['depth scale', s.depth_scale != null ? s.depth_scale + ' m / unit' : '—'],
+    ['intrinsics', i ? `${i.width}×${i.height} fx ${i.fx.toFixed(1)} fy ${i.fy.toFixed(1)} ppx ${i.ppx.toFixed(1)} ppy ${i.ppy.toFixed(1)}` : '—'],
+    ['distortion', i ? i.model : '—'],
+    ['depth window', s.config ? s.config.depth_window_px + ' px, ≥' + s.config.depth_min_valid_px + ' valid' : '—'],
+    ['smoothing', s.config ? 'EMA α=' + s.config.smooth_alpha + ', snap ≥' + s.config.smooth_max_jump_m + ' m' : '—'],
+    ['active / known tracks', s.active_tracks + ' / ' + s.known_tracks],
+    ['last error', s.last_error ? '<span class="mono">' + esc(s.last_error) + '</span>' : '—']
+  ].map(([k, val]) => '<dt>' + esc(k) + '</dt><dd>' + val + '</dd>').join('');
+
+  if (s.convention) {
+    $('#convBox').innerHTML = Object.entries(s.convention)
+      .map(([k, v]) => '<div><span class="mono">' + esc(k) + '</span> — ' + esc(v) + '</div>').join('');
+  }
+  if ((s.missing_dependencies || []).length) {
+    $('#feedPlaceholder') && ($('#feedPlaceholder').innerHTML =
+      'Missing dependency: <span class="mono">' + esc(s.missing_dependencies.join(', ')) + '</span>' +
+      '<br>See <span class="mono">docs/VISION.md</span>.');
+  }
+}
+
+// ------------------------------------------------------------------ tracks --
+function fmt(v, sign) {
+  if (v == null) return '—';
+  return (sign && v >= 0 ? '+' : '') + v.toFixed(2);
+}
+
+async function refreshTracks() {
+  try { const r = await WQ.api('/vision/tracks?trajectory=true'); TRACKS = r.tracks || []; }
+  catch (e) { TRACKS = []; }
+
+  const sel = TRACKS.find(t => t.track_id === SELECTED) || TRACKS[0] || null;
+  const sp = sel && sel.camera_position_smoothed;
+
+  $('#kpis').innerHTML =
+    WQ.kpi({ label: 'Active tracks', value: TRACKS.length,
+             tone: TRACKS.length ? 'good' : 'neutral' }) +
+    WQ.kpi({ label: 'Selected', value: sel ? '<span class="nowrap">' + esc(sel.label) + '</span>' : '—',
+             sub: sel ? 'conf ' + sel.detection_confidence.toFixed(2) : '' }) +
+    WQ.kpi({ label: 'X (lateral)', value: sp ? fmt(sp.x_m, true) + ' m' : '—',
+             sub: '+ right / − left', tone: sp ? 'good' : 'neutral' }) +
+    WQ.kpi({ label: 'Z (range)', value: sp ? fmt(sp.z_m) + ' m' : '—',
+             sub: 'forward from the lens', tone: sp ? 'good' : 'neutral' }) +
+    WQ.kpi({ label: 'Depth', value: sel ? (sel.depth_valid ? fmt(sel.depth_m) + ' m' : 'invalid') : '—',
+             sub: sel && !sel.depth_valid ? esc(sel.depth_reason || '') : (sel ? esc(sel.anchor_source || '') : ''),
+             tone: sel ? (sel.depth_valid ? 'good' : 'warn') : 'neutral' }) +
+    WQ.kpi({ label: 'FPS', value: STATUS && STATUS.fps ? STATUS.fps.toFixed(1) : '—' });
+
+  const tb = $('#tkTbl tbody');
+  if (!TRACKS.length) {
+    tb.innerHTML = '<tr><td colspan="10" class="muted small">No tracks — stand in front of the camera.</td></tr>';
+  } else {
+    tb.innerHTML = TRACKS.map(t => {
+      const r = t.camera_position_raw, s = t.camera_position_smoothed;
+      const on = (sel && t.track_id === sel.track_id) ? ' on' : '';
+      return '<tr class="tk-sel' + on + '" data-id="' + t.track_id + '">' +
+        '<td class="mono">' + esc(t.label) + '</td>' +
+        '<td>' + t.detection_confidence.toFixed(2) + '</td>' +
+        '<td>' + (t.depth_valid ? fmt(t.depth_m) + ' m'
+                                : chip('warn', 'invalid')) + '</td>' +
+        '<td class="mono">' + fmt(r && r.x_m, true) + '</td>' +
+        '<td class="mono">' + fmt(r && r.z_m) + '</td>' +
+        '<td class="mono">' + fmt(s && s.x_m, true) + '</td>' +
+        '<td class="mono">' + fmt(s && s.z_m) + '</td>' +
+        '<td class="small">' + esc(t.anchor_source || '—') + '</td>' +
+        '<td>' + t.age_s.toFixed(1) + ' s</td>' +
+        '<td>' + t.frames + '</td>' +
+      '</tr>';
+    }).join('');
+    [...tb.querySelectorAll('tr.tk-sel')].forEach(tr => {
+      tr.addEventListener('click', () => { SELECTED = parseInt(tr.dataset.id, 10); refreshTracks(); });
+    });
+  }
+  drawTopDown();
+}
+
+// ---------------------------------------------------------------- top-down --
+function drawTopDown() {
+  const cv = $('#topdown');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) {
+    cv.width = w * dpr; cv.height = h * dpr;
+  }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const css = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => (css.getPropertyValue(name) || fallback).trim();
+  const ink = v('--ink-1', '#f2f4f6');
+  const line = v('--line-1', 'rgba(255,255,255,.08)');
+  const surf = v('--surface-2', '#1b1f23');
+  const good = v('--good', '#0ca30c'), warn = v('--warn', '#fab219'),
+        accent = v('--accent', '#3987e5');
+
+  g.fillStyle = surf; g.fillRect(0, 0, w, h);
+
+  const pad = 26;
+  const zSpan = RANGE;                       // metres shown up the page
+  const scale = (h - pad * 2) / zSpan;       // px per metre
+  const xSpan = (w - pad * 2) / scale;       // metres across, derived
+  const ox = w / 2, oy = h - pad;            // camera origin: bottom centre
+  const px = (x, z) => [ox + x * scale, oy - z * scale];
+
+  // grid: one line per metre
+  g.strokeStyle = line; g.lineWidth = 1; g.font = '10px system-ui, sans-serif';
+  g.fillStyle = ink; g.globalAlpha = 0.55;
+  for (let z = 1; z <= zSpan; z++) {
+    const [, yy] = px(0, z);
+    g.beginPath(); g.moveTo(pad, yy); g.lineTo(w - pad, yy); g.stroke();
+    g.fillText(z + ' m', 4, yy - 2);
+  }
+  for (let x = -Math.floor(xSpan / 2); x <= Math.floor(xSpan / 2); x++) {
+    const [xx] = px(x, 0);
+    g.beginPath(); g.moveTo(xx, pad); g.lineTo(xx, oy); g.stroke();
+    if (x !== 0) g.fillText((x > 0 ? '+' : '') + x, xx + 2, h - 10);
+  }
+  g.globalAlpha = 1;
+
+  // camera field of view, from the real intrinsics when we have them
+  if (STATUS && STATUS.intrinsics) {
+    const i = STATUS.intrinsics;
+    const halfW = (i.width / 2) / i.fx;      // tan(hfov/2)
+    g.fillStyle = accent; g.globalAlpha = 0.07;
+    g.beginPath();
+    g.moveTo(ox, oy);
+    g.lineTo(...px(-halfW * zSpan, zSpan));
+    g.lineTo(...px(halfW * zSpan, zSpan));
+    g.closePath(); g.fill();
+    g.globalAlpha = 1;
+  }
+
+  // camera marker
+  g.fillStyle = ink;
+  g.beginPath(); g.moveTo(ox - 7, oy + 5); g.lineTo(ox + 7, oy + 5); g.lineTo(ox, oy - 7);
+  g.closePath(); g.fill();
+  g.font = '11px system-ui, sans-serif';
+  g.fillText('camera', ox + 10, oy + 4);
+
+  // tracks
+  TRACKS.forEach(t => {
+    const s = t.camera_position_smoothed;
+    const colour = t.depth_valid ? good : warn;
+
+    if (TRAIL && t.trajectory && t.trajectory.length > 1) {
+      g.strokeStyle = colour; g.globalAlpha = 0.45; g.lineWidth = 2;
+      g.beginPath();
+      t.trajectory.forEach((p, k) => {
+        const [xx, yy] = px(p.x_m, p.z_m);
+        k ? g.lineTo(xx, yy) : g.moveTo(xx, yy);
+      });
+      g.stroke(); g.globalAlpha = 1;
+    }
+
+    if (!s) return;
+    const [xx, yy] = px(s.x_m, s.z_m);
+    const selected = SELECTED === t.track_id || (SELECTED == null && TRACKS[0] === t);
+
+    if (selected) {
+      g.strokeStyle = colour; g.lineWidth = 1.5; g.globalAlpha = 0.7;
+      g.beginPath(); g.arc(xx, yy, 13, 0, Math.PI * 2); g.stroke(); g.globalAlpha = 1;
+    }
+    g.fillStyle = colour;
+    g.beginPath(); g.arc(xx, yy, 6, 0, Math.PI * 2); g.fill();
+
+    g.fillStyle = ink; g.font = '11px system-ui, sans-serif';
+    g.fillText(t.label, xx + 10, yy - 6);
+    g.globalAlpha = 0.7;
+    g.fillText(fmt(s.x_m, true) + ' / ' + fmt(s.z_m) + ' m', xx + 10, yy + 7);
+    g.globalAlpha = 1;
+  });
+
+  if (!TRACKS.length) {
+    g.fillStyle = ink; g.globalAlpha = 0.45;
+    g.font = '12px system-ui, sans-serif';
+    g.fillText('no live tracks', ox - 38, h / 2);
+    g.globalAlpha = 1;
+  }
+}
+window.addEventListener('resize', drawTopDown);
+
+// ------------------------------------------------------------- calibration --
+$('#calBtn').addEventListener('click', async () => {
+  const [x, z] = $('#calPreset').value.split(',').map(parseFloat);
+  const label = $('#calPreset').selectedOptions[0].textContent;
+  try {
+    const s = await WQ.api('/vision/calibration/samples', {
+      method: 'POST',
+      body: { label: label, expected_x_m: x, expected_z_m: z, track_id: SELECTED }
+    });
+    if (s.measured_x_m == null) WQ.toast(s.note || 'No measurement available', 'warn');
+    else WQ.toast('Captured: error ' + s.error_total_m.toFixed(2) + ' m', 'good');
+    refreshCalibration();
+  } catch (e) { WQ.toast('Capture failed: ' + e.message, 'crit'); }
+});
+
+$('#calClear').addEventListener('click', async () => {
+  await WQ.api('/vision/calibration/samples', { method: 'DELETE' });
+  refreshCalibration();
+});
+
+async function refreshCalibration() {
+  let rows = [];
+  try { rows = await WQ.api('/vision/calibration/samples'); } catch (e) { /* ignore */ }
+  const tb = $('#calTbl tbody');
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="muted small">No samples yet.</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.slice().reverse().map(s => {
+    if (s.measured_x_m == null) {
+      return '<tr><td class="mono">' + fmt(s.expected_x_m, true) + ' / ' + fmt(s.expected_z_m) + '</td>' +
+             '<td colspan="4" class="muted small">' + esc(s.note || 'no measurement') + '</td></tr>';
+    }
+    const tot = s.error_total_m;
+    const tone = tot <= 0.15 ? 'good' : (tot <= 0.4 ? 'warn' : 'crit');
+    return '<tr>' +
+      '<td class="mono">' + fmt(s.expected_x_m, true) + ' / ' + fmt(s.expected_z_m) + '</td>' +
+      '<td class="mono">' + fmt(s.measured_x_m, true) + ' / ' + fmt(s.measured_z_m) + '</td>' +
+      '<td class="mono">' + fmt(s.error_x_m, true) + '</td>' +
+      '<td class="mono">' + fmt(s.error_z_m, true) + '</td>' +
+      '<td>' + chip(tone, tot.toFixed(2) + ' m') + '</td></tr>';
+  }).join('');
+}
+
+// ------------------------------------------------------------------- loops --
+// Two cadences on purpose: tracks are what you watch while walking around,
+// status is slow-moving. The MJPEG feed is pushed by the backend and is not
+// polled at all.
+refreshStatus();
+refreshTracks();
+refreshCalibration();
+setInterval(refreshTracks, 160);
+setInterval(refreshStatus, 1500);
+</script>
+</body>
+</html>

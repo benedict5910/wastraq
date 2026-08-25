@@ -1,0 +1,35 @@
+# Wastraq demo backend dependencies.
+#
+# Deliberately ranges, not exact pins.
+#
+# Exact pins looked reproducible and were the opposite: `psycopg-binary==3.2.3`
+# has no wheel for newer CPython, so a machine whose `python3` had moved on
+# could not install ANY of this - pip aborts the whole resolution on the first
+# unsatisfiable requirement, which is how python-multipart silently went
+# missing and the backend then died at import time on the photo-upload route.
+#
+# Reproducibility comes from the interpreter instead: scripts/py_env.sh pins
+# the project to Python 3.11 (see scripts/setup_python_env.sh). Within that,
+# these ranges let pip pick a version that actually has a wheel.
+#
+# Upper bounds are major-version guards, not version freezes.
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+
+# psycopg 3 with the prebuilt libpq wheel - no local PostgreSQL headers needed.
+psycopg[binary]>=3.2,<4.0
+psycopg-pool>=3.2,<4.0
+
+pydantic>=2.7,<3.0
+python-dotenv>=1.0,<2.0
+requests>=2.31,<3.0
+
+# multipart/form-data for the survey photo upload endpoint.
+# FastAPI imports this at ROUTE BUILD time, not on first request: without it
+# the whole app fails to start, not just that one endpoint.
+python-multipart>=0.0.9,<1.0
+
+# geometry generation in scripts/generate_real_lane.py and
+# scripts/generate_survey_seed.py
+numpy>=1.26,<3.0
